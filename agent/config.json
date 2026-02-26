@@ -1,0 +1,18 @@
+{
+    "api_base_url": "http://127.0.0.1:3000",
+    "defi_policy": {
+        "public_values": {
+            "max_spend": 1000,
+            "restricted_endpoints": [
+                "/admin"
+            ]
+        }
+    },
+    "enterprise_policy": {
+        "public_values": {
+            "restricted_endpoints": [
+                "salary"
+            ]
+        }
+    }
+}

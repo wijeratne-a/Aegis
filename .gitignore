@@ -1,0 +1,22 @@
+# Compiled output
+**/target/
+debug/
+
+# Rustfmt backup files
+**/*.rs.bk
+
+# Generated artifacts
+signing_key.bin
+manifest.json
+trace.log
+
+# OS files
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
