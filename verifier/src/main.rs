@@ -12,6 +12,7 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde_json::Value;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use axum::http::{header, Method};
 
 mod engine;
 mod schema;
@@ -61,11 +62,20 @@ async fn main() -> anyhow::Result<()> {
         signing_key: Arc::new(SigningKey::generate(&mut OsRng)),
     };
 
+    let allowed_origins = [
+        "http://localhost:3001".parse().unwrap(),
+        "http://127.0.0.1:3001".parse().unwrap(),
+    ];
+    let cors = CorsLayer::new()
+        .allow_origin(allowed_origins)
+        .allow_methods([Method::POST, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+
     let app = Router::new()
         .route("/v1/register", post(register_handler))
         .route("/v1/verify", post(verify_handler))
         .with_state(state)
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
