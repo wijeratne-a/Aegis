@@ -1,0 +1,22 @@
+# Aegis Proxy
+
+Forward proxy with TLS MITM, payload parsing, and Rego-based policy evaluation. See [../docs/proxy_mitm_ca_trust.md](../docs/proxy_mitm_ca_trust.md) for CA trust (REQUESTS_CA_BUNDLE, NODE_EXTRA_CA_CERTS) and proxy setup.
+
+## Quick Start
+
+```bash
+# Write CA to file for agent trust
+export AEGIS_CA_PATH=/etc/aegis/ca.crt
+cargo run
+```
+
+## Environment
+
+| Variable        | Default          | Description                          |
+|-----------------|------------------|--------------------------------------|
+| PROXY_BIND      | 0.0.0.0:8080    | Listen address                       |
+| AEGIS_CA_PATH   | (unset)         | Write Root CA PEM here for agents    |
+| POLICY_PATH     | policy.json     | JSON policy config                   |
+| POLICY_REGO_PATH| policies/payload.rego | Rego payload policy (optional) |
+| VERIFIER_URL    | http://127.0.0.1:3000 | Verifier for healthcheck      |
+| ENFORCE_MODE    | strict          | strict \| audit_only                 |

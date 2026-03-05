@@ -12,9 +12,12 @@ use tokio::net::TcpListener;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
 
+mod certs;
 mod intercept;
+mod payload_policy;
 mod trace_log;
 
+use certs::{build_mitm_server_config, RootCa};
 use intercept::{EnforceMode, PolicyConfig, ProxyConfig, ProxyState};
 use trace_log::TraceLogger;
 
@@ -55,6 +58,24 @@ async fn main() -> Result<()> {
         PolicyConfig::default()
     });
 
+    let root_ca = RootCa::generate()?;
+    let ca_pem = root_ca.export_pem();
+    if let Ok(ca_path) = std::env::var("AEGIS_CA_PATH") {
+        if let Some(parent) = std::path::Path::new(&ca_path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&ca_path, &ca_pem)?;
+        info!("Root CA written to {}", ca_path);
+    }
+
+    let mitm_server_config = build_mitm_server_config(root_ca)?;
+
+    let payload_engine = std::env::var("POLICY_REGO_PATH")
+        .unwrap_or_else(|_| "policies/payload.rego".to_string());
+    let payload_engine = payload_policy::PayloadPolicyEngine::load_from_path(&payload_engine)
+        .map(Arc::new)
+        .ok();
+
     let state = ProxyState {
         config: Arc::new(ProxyConfig {
             enforce_mode,
@@ -63,6 +84,9 @@ async fn main() -> Result<()> {
         }),
         logger: TraceLogger::new(&trace_wal)?,
         client: reqwest::Client::new(),
+        mitm_server_config,
+        payload_engine,
+        ca_pem: Some(ca_pem),
     };
 
     let addr: SocketAddr = bind

@@ -1,16 +1,20 @@
 use std::{net::{IpAddr, SocketAddr}, str::FromStr, sync::Arc};
 
+use rustls::ServerConfig;
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use http::{
     header::{HOST, HeaderValue},
     Method, Request, Response, StatusCode, Uri,
 };
-use http_body_util::{BodyExt, Full};
-use hyper::{body::Incoming, upgrade::OnUpgrade};
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
+use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::{io::copy_bidirectional, net::TcpStream};
+use serde_json::Value as JsonValue;
+use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, info_span, warn};
 
 use crate::trace_log::TraceLogger;
@@ -73,11 +77,29 @@ pub struct PolicyConfig {
     pub restricted_endpoints: Vec<String>,
 }
 
+/// Max HTTP request body size (5 MB) for MITM payload parsing.
+const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
+
+/// Max HTTP response body size (10 MB) when relaying from upstream.
+const MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct IdentityContext {
     pub session_id: Option<String>,
     pub user_id: Option<String>,
     pub iam_role: Option<String>,
+}
+
+/// Input shape for Rego payload policy evaluation (A2T/A2D/A2A).
+#[derive(Debug, Clone, Serialize)]
+pub struct PayloadRegoInput {
+    pub method: String,
+    pub path: String,
+    pub host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<JsonValue>,
+    pub headers: std::collections::HashMap<String, String>,
+    pub identity: IdentityContext,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +118,10 @@ pub struct ProxyState {
     pub config: Arc<ProxyConfig>,
     pub logger: TraceLogger,
     pub client: reqwest::Client,
+    pub mitm_server_config: Arc<ServerConfig>,
+    pub payload_engine: Option<Arc<crate::payload_policy::PayloadPolicyEngine>>,
+    /// Root CA PEM for GET /ca (loopback only). Used for agent trust setup.
+    pub ca_pem: Option<String>,
 }
 
 pub type ProxyBody = Full<bytes::Bytes>;
@@ -114,6 +140,24 @@ fn response_500() -> Response<ProxyBody> {
         .header("content-type", "application/json")
         .body(Full::new(bytes::Bytes::from(r#"{"error":"internal error"}"#)))
         .expect("fallback 500 response must succeed")
+}
+
+fn is_json_content_type(headers: &http::HeaderMap<HeaderValue>) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.trim().to_lowercase().starts_with("application/json"))
+        .unwrap_or(false)
+}
+
+fn headers_to_map(headers: &http::HeaderMap<HeaderValue>) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for (name, value) in headers.iter() {
+        if let Ok(v) = value.to_str() {
+            map.insert(name.as_str().to_lowercase(), v.to_string());
+        }
+    }
+    map
 }
 
 fn get_identity(headers: &http::HeaderMap<HeaderValue>) -> IdentityContext {
@@ -145,23 +189,38 @@ pub async fn handle(
 ) -> Result<Response<ProxyBody>> {
     let method = req.method().clone();
 
-    if method == Method::GET && req.uri().path() == "/healthz" {
-        let verifier_health = format!(
-            "{}/healthz",
-            state.config.verifier_url.trim_end_matches('/')
-        );
-        let healthy = state.client.get(verifier_health).send().await;
-        if healthy.as_ref().map(|r| r.status().is_success()).unwrap_or(false) {
-            return Ok(response_with(StatusCode::OK, r#"{"status":"ok"}"#));
+    if method == Method::GET {
+        let path = req.uri().path();
+        if path == "/healthz" {
+            let verifier_health = format!(
+                "{}/healthz",
+                state.config.verifier_url.trim_end_matches('/')
+            );
+            let healthy = state.client.get(verifier_health).send().await;
+            if healthy.as_ref().map(|r| r.status().is_success()).unwrap_or(false) {
+                return Ok(response_with(StatusCode::OK, r#"{"status":"ok"}"#));
+            }
+            return Ok(response_with(
+                StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"status":"degraded"}"#,
+            ));
         }
-        return Ok(response_with(
-            StatusCode::SERVICE_UNAVAILABLE,
-            r#"{"status":"degraded"}"#,
-        ));
+        if (path == "/ca" || path == "/.well-known/ca.crt")
+            && state.ca_pem.is_some()
+            && remote_addr.ip().is_loopback()
+        {
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/x-pem-file")
+                .body(Full::new(bytes::Bytes::from(
+                    state.ca_pem.as_ref().unwrap().clone(),
+                )))
+                .unwrap_or_else(|_| response_500()));
+        }
     }
 
     if method == Method::CONNECT {
-        return handle_connect(req, remote_addr).await;
+        return handle_connect(state, req, remote_addr).await;
     }
 
     let identity = get_identity(req.headers());
@@ -292,6 +351,7 @@ fn absolute_uri(uri: &Uri, headers: &http::HeaderMap<HeaderValue>) -> Result<Uri
 }
 
 async fn handle_connect(
+    state: ProxyState,
     mut req: Request<Incoming>,
     remote_addr: SocketAddr,
 ) -> Result<Response<ProxyBody>> {
@@ -310,8 +370,8 @@ async fn handle_connect(
     let on_upgrade = hyper::upgrade::on(&mut req);
 
     tokio::spawn(async move {
-        if let Err(err) = tunnel(on_upgrade, authority).await {
-            error!("CONNECT tunnel error: {err}");
+        if let Err(err) = run_mitm_tunnel(state, on_upgrade, authority).await {
+            error!("CONNECT MITM tunnel error: {err}");
         }
     });
 
@@ -321,13 +381,164 @@ async fn handle_connect(
         .unwrap_or_else(|_| response_500()))
 }
 
-async fn tunnel(on_upgrade: OnUpgrade, authority: String) -> Result<()> {
-    let mut upgraded = TokioIo::new(on_upgrade.await.context("upgrade failed")?);
-    let mut server = TcpStream::connect(&authority)
+async fn run_mitm_tunnel(
+    state: ProxyState,
+    on_upgrade: hyper::upgrade::OnUpgrade,
+    authority: String,
+) -> Result<()> {
+    let upgraded = on_upgrade.await.context("upgrade failed")?;
+    let io = TokioIo::new(upgraded);
+    let acceptor = TlsAcceptor::from(Arc::clone(&state.mitm_server_config));
+    let tls_stream = acceptor
+        .accept(io)
         .await
-        .with_context(|| format!("failed to connect tunnel target {authority}"))?;
-    let _ = copy_bidirectional(&mut upgraded, &mut server)
-        .await
-        .context("tunnel copy failed")?;
+        .context("TLS handshake failed")?;
+    let io = TokioIo::new(tls_stream);
+
+    let authority_clone = authority.clone();
+    let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
+        let state = state.clone();
+        let authority = authority_clone.clone();
+        async move {
+            Ok::<_, hyper::Error>(
+                handle_mitm_request(state, authority, req)
+                    .await
+                    .unwrap_or_else(|_| response_500()),
+            )
+        }
+    });
+
+    let conn = hyper::server::conn::http1::Builder::new()
+        .serve_connection(io, svc)
+        .with_upgrades();
+
+    conn.await.context("MITM connection error")?;
     Ok(())
+}
+
+async fn handle_mitm_request(
+    state: ProxyState,
+    authority: String,
+    req: Request<Incoming>,
+) -> Result<Response<ProxyBody>, Box<dyn std::error::Error + Send + Sync>> {
+    let method = req.method().clone();
+    let (parts, body) = req.into_parts();
+    let path_q = parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let host = authority.split(':').next().unwrap_or(&authority).to_string();
+
+    let limited_body = Limited::new(body, MAX_BODY_BYTES);
+    let collected = match limited_body.collect().await {
+        Ok(c) => c,
+        Err(e) => {
+            if e.downcast_ref::<LengthLimitError>().is_some() {
+                return Ok(Response::builder()
+                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                    .header("content-type", "application/json")
+                    .body(Full::new(bytes::Bytes::from(
+                        r#"{"error":"payload too large","reason":"request body exceeds 5MB limit"}"#,
+                    )))
+                    .unwrap_or_else(|_| response_500()));
+            }
+            return Err(e.into());
+        }
+    };
+    let body_bytes = collected.to_bytes();
+
+    let body_json: Option<JsonValue> = if is_json_content_type(&parts.headers) && !body_bytes.is_empty() {
+        serde_json::from_slice(&body_bytes).ok()
+    } else {
+        None
+    };
+
+    let identity = get_identity(&parts.headers);
+    let headers_map = headers_to_map(&parts.headers);
+    let rego_input = PayloadRegoInput {
+        method: method.as_str().to_string(),
+        path: path_q.to_string(),
+        host: host.clone(),
+        body: body_json,
+        headers: headers_map,
+        identity: identity.clone(),
+    };
+
+    if let Some(ref engine) = state.payload_engine {
+        match engine.evaluate(&rego_input) {
+            Ok(decision) if !decision.allow => {
+                let reason = decision.reason.unwrap_or_else(|| "policy violation".to_string());
+                return Ok(Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .header("content-type", "application/json")
+                    .body(Full::new(bytes::Bytes::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "error": "policy violation",
+                            "reason": reason
+                        }))
+                        .unwrap_or_else(|_| r#"{"error":"policy violation"}"#.to_string()),
+                    )))
+                    .unwrap_or_else(|_| response_500()));
+            }
+            Err(e) => {
+                tracing::warn!("payload policy evaluation error: {e}");
+                return Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("content-type", "application/json")
+                    .body(Full::new(bytes::Bytes::from(
+                        r#"{"error":"policy evaluation failed"}"#,
+                    )))
+                    .unwrap_or_else(|_| response_500()));
+            }
+            _ => {}
+        }
+    }
+
+    let target_url = format!("https://{authority}{path_q}");
+    let mut headers = parts.headers.clone();
+    headers.remove("proxy-connection");
+    headers.remove("Proxy-Connection");
+    let upstream_res = state
+        .client
+        .request(method, &target_url)
+        .headers(headers)
+        .body(body_bytes)
+        .send()
+        .await?;
+
+    let status = upstream_res.status();
+    let headers = upstream_res.headers().clone();
+    if upstream_res.content_length().unwrap_or(0) > MAX_RESPONSE_BYTES {
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .header("content-type", "application/json")
+            .body(Full::new(bytes::Bytes::from(
+                r#"{"error":"upstream response too large"}"#,
+            )))
+            .unwrap_or_else(|_| response_500()));
+    }
+    let mut body_stream = upstream_res.bytes_stream();
+    let mut total: u64 = 0;
+    let mut body_buf = bytes::BytesMut::new();
+    while let Some(chunk) = body_stream.next().await {
+        let chunk = chunk?;
+        total += chunk.len() as u64;
+        if total > MAX_RESPONSE_BYTES {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header("content-type", "application/json")
+                .body(Full::new(bytes::Bytes::from(
+                    r#"{"error":"upstream response too large"}"#,
+                )))
+                .unwrap_or_else(|_| response_500()));
+        }
+        body_buf.extend_from_slice(&chunk);
+    }
+    let body_bytes = body_buf.freeze();
+
+    let mut resp_builder = Response::builder().status(status);
+    for (name, value) in &headers {
+        resp_builder = resp_builder.header(name.as_str(), value.clone());
+    }
+    let resp = resp_builder
+        .body(Full::new(body_bytes))
+        .unwrap_or_else(|_| response_500());
+    Ok(resp)
 }
