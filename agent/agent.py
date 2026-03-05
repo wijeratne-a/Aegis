@@ -61,6 +61,7 @@ C = _Palette
 
 _DEFAULT_PROXY = "http://127.0.0.1:8080"
 _DEFAULT_CA_BUNDLE = "/etc/aegis/ca.crt"
+_DEFAULT_VERIFIER = "http://127.0.0.1:3000"
 
 
 def _configure_proxy_env() -> None:
@@ -90,7 +91,8 @@ def print_verify_result(label: str, result_body: Dict[str, Any]) -> None:
 
 def run_defi_demo() -> None:
     print("=== Test A: DeFi Safe-Pay ===")
-    aegis = Aegis(base_url="http://44.204.128.105", batch_size=1, flush_interval_s=0.1)
+    verifier_base = os.environ.get("AEGIS_BASE_URL", _DEFAULT_VERIFIER)
+    aegis = Aegis(base_url=verifier_base, batch_size=1, flush_interval_s=0.1)
 
     policy = {"public_values": {"max_spend": 1000, "restricted_endpoints": ["/admin"]}}
     commitment = aegis.init(
@@ -120,7 +122,8 @@ def run_defi_demo() -> None:
 
 def run_enterprise_demo() -> None:
     print("=== Test B: Enterprise PII-Guard ===")
-    aegis = Aegis(base_url="http://44.204.128.105", batch_size=1, flush_interval_s=0.1)
+    verifier_base = os.environ.get("AEGIS_BASE_URL", _DEFAULT_VERIFIER)
+    aegis = Aegis(base_url=verifier_base, batch_size=1, flush_interval_s=0.1)
 
     policy = {"public_values": {"restricted_endpoints": ["salary"]}}
     commitment = aegis.init(
@@ -182,7 +185,7 @@ def _run_scripted_demo() -> None:
     print(C.cyan(_BANNER))
     time.sleep(_PHASE_DELAY)
 
-    base_url = os.environ.get("AEGIS_BASE_URL", "http://44.204.128.105")
+    base_url = os.environ.get("AEGIS_BASE_URL", _DEFAULT_VERIFIER)
     aegis = Aegis(base_url=base_url, batch_size=1, flush_interval_s=0.1)
 
     # ------------------------------------------------------------------

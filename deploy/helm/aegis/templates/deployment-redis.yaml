@@ -13,9 +13,13 @@ spec:
       labels:
         app: aegis-redis
     spec:
+      securityContext:
+        {{- toYaml .Values.redis.podSecurityContext | nindent 8 }}
       containers:
         - name: redis
           image: redis:7-alpine
+          securityContext:
+            {{- toYaml .Values.redis.containerSecurityContext | nindent 12 }}
           ports:
             - containerPort: 6379
           resources:

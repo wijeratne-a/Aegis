@@ -17,10 +17,59 @@ mod payload_policy;
 mod schema_validator;
 pub mod telemetry;
 mod trace_log;
+mod webhook;
 
 use certs::{build_mitm_server_config, RootCa};
 use intercept::{EnforceMode, LivePolicy, PolicyConfig, ProxyConfig, ProxyState};
 use trace_log::TraceLogger;
+
+fn env_var_non_empty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn build_http_client(upstream_timeout_secs: u64) -> Result<reqwest::Client> {
+    let mut builder =
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(upstream_timeout_secs));
+
+    if let Some(ca_path) = env_var_non_empty("VERIFIER_TLS_CA_PATH") {
+        let ca_pem = fs::read(&ca_path)
+            .with_context(|| format!("failed to read verifier CA cert from {ca_path}"))?;
+        let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
+            .with_context(|| format!("invalid PEM CA cert in {ca_path}"))?;
+        builder = builder.add_root_certificate(ca_cert);
+    }
+
+    let cert_path = env_var_non_empty("VERIFIER_TLS_CERT_PATH");
+    let key_path = env_var_non_empty("VERIFIER_TLS_KEY_PATH");
+    match (cert_path, key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert_pem = fs::read(&cert_path)
+                .with_context(|| format!("failed to read verifier client cert from {cert_path}"))?;
+            let key_pem = fs::read(&key_path)
+                .with_context(|| format!("failed to read verifier client key from {key_path}"))?;
+            let mut identity_pem = cert_pem;
+            if !identity_pem.ends_with(b"\n") {
+                identity_pem.push(b'\n');
+            }
+            identity_pem.extend_from_slice(&key_pem);
+            let identity = reqwest::Identity::from_pem(&identity_pem).with_context(|| {
+                format!("failed to parse verifier client identity from {cert_path} and {key_path}")
+            })?;
+            builder = builder.identity(identity);
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!(
+                "VERIFIER_TLS_CERT_PATH and VERIFIER_TLS_KEY_PATH must both be set for mTLS"
+            );
+        }
+        (None, None) => {}
+    }
+
+    builder.build().context("failed to build reqwest client")
+}
 
 fn read_policy(path: &str) -> Result<PolicyConfig> {
     let raw = fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
@@ -43,6 +92,14 @@ async fn main() -> Result<()> {
     let semantic_deny = std::env::var("SEMANTIC_DENY")
         .map(|v| v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("1"))
         .unwrap_or(true);
+    let webhook_url = std::env::var("WEBHOOK_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let webhook_secret = std::env::var("WEBHOOK_SECRET")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
 
     let upstream_timeout_secs = std::env::var("UPSTREAM_TIMEOUT_SECS")
         .ok()
@@ -89,6 +146,12 @@ async fn main() -> Result<()> {
     let payload_engine = payload_policy::PayloadPolicyEngine::load_from_path(&payload_engine)
         .map(Arc::new)
         .ok();
+    let response_policy_engine = std::env::var("POLICY_RESPONSE_REGO_PATH")
+        .unwrap_or_else(|_| "policies/response.rego".to_string());
+    let response_policy_engine =
+        payload_policy::ResponsePolicyEngine::load_from_path(&response_policy_engine)
+            .map(Arc::new)
+            .ok();
 
     let schema_registry = std::env::var("SCHEMA_REGISTRY_PATH")
         .ok()
@@ -114,13 +177,19 @@ async fn main() -> Result<()> {
             policy,
             semantic_deny,
         }),
+        webhook: webhook_url.zip(webhook_secret).and_then(|(url, secret)| {
+            if secret.len() < 32 {
+                error!("WEBHOOK_SECRET must be at least 32 characters; webhook disabled");
+                None
+            } else {
+                Some(webhook::WebhookConfig { url, secret })
+            }
+        }),
         logger: TraceLogger::new(&trace_wal)?,
-        client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(upstream_timeout_secs))
-            .build()
-            .context("failed to build reqwest client")?,
+        client: build_http_client(upstream_timeout_secs)?,
         mitm_server_config,
         payload_engine,
+        response_policy_engine,
         schema_registry,
         ca_pem: Some(ca_pem),
         live_policy,

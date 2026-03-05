@@ -1,17 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { potReceiptSchema } from "@/lib/schemas";
-import { checkReceiptIngestLimit } from "@/lib/rate-limit";
+import { checkReceiptIngestLimit, getTrustedIp } from "@/lib/rate-limit";
 import { createHash, timingSafeEqual } from "crypto";
-
-type StoredReceipt = {
-  received_at: string;
-  tenant_id: string;
-  value: unknown;
-};
-
-const receipts: StoredReceipt[] = [];
-const MAX_RECEIPTS = 1000;
+import { listReceiptsByOrg, pushReceipt } from "@/lib/receipt-store";
+import { ensureStartupValidation } from "@/lib/startup";
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 
 type AuthResult =
@@ -38,23 +31,43 @@ function isAuthorizedSidecar(request: NextRequest): AuthResult {
   }
 }
 
-function getTenantId(request: NextRequest): string {
-  const tenant = request.headers.get("x-aegis-tenant-id") ?? request.headers.get("x-aegis-user-id");
-  return tenant?.trim() || "default";
+function getOrgIdFromToken(token: string): string | null {
+  if (!token || !token.includes(".")) return null;
+  const b64Part = token.split(".")[0]?.trim();
+  if (!b64Part) return null;
+  try {
+    const decoded = Buffer.from(b64Part, "base64url").toString("utf8");
+    return decoded || null;
+  } catch {
+    return null;
+  }
 }
 
-function getReceiptRateLimitKey(request: NextRequest, tenantId: string): string {
+function getOrgIdFromIngestHeaders(request: NextRequest, token: string | null): string {
+  if (token) {
+    const orgIdFromToken = getOrgIdFromToken(token);
+    if (orgIdFromToken != null) return orgIdFromToken;
+  }
+  const orgId =
+    request.headers.get("x-aegis-org-id") ??
+    request.headers.get("x-aegis-tenant-id") ??
+    request.headers.get("x-aegis-user-id");
+  return orgId?.trim() || "default";
+}
+
+function getReceiptRateLimitKey(request: NextRequest, orgId: string): string {
   const token = request.headers.get("x-aegis-ingest-token");
   if (token) {
     const hash = createHash("sha256").update(token).digest("hex").slice(0, 16);
-    return `receipt:${tenantId}:${hash}`;
+    return `receipt:${orgId}:${hash}`;
   }
-  const forwarded = request.headers.get("x-forwarded-for");
-  const ip = forwarded ? forwarded.split(",")[0]?.trim() : request.headers.get("x-real-ip");
-  return `receipt:${tenantId}:${ip ?? "unknown"}`;
+  const ip = getTrustedIp(request);
+  return `receipt:${orgId}:${ip}`;
 }
 
 export async function POST(request: NextRequest) {
+  ensureStartupValidation();
+
   const auth = isAuthorizedSidecar(request);
   if (!auth.ok) {
     const msg =
@@ -64,8 +77,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: msg }, { status: auth.status });
   }
 
-  const tenantId = getTenantId(request);
-  const rateKey = getReceiptRateLimitKey(request, tenantId);
+  const token = request.headers.get("x-aegis-ingest-token");
+  const orgId = getOrgIdFromIngestHeaders(request, token);
+  const rateKey = getReceiptRateLimitKey(request, orgId);
   const { allowed } = checkReceiptIngestLimit(rateKey);
   if (!allowed) {
     return NextResponse.json(
@@ -94,31 +108,26 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid receipt payload" }, { status: 400 });
   }
 
-  receipts.unshift({
-    received_at: new Date().toISOString(),
-    tenant_id: tenantId,
-    value: parsed.data,
-  });
-  if (receipts.length > MAX_RECEIPTS) {
-    receipts.length = MAX_RECEIPTS;
-  }
+  pushReceipt(orgId, parsed.data);
   return NextResponse.json({ status: "ok" });
 }
 
 export async function GET(request: NextRequest) {
+  ensureStartupValidation();
+
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const tenantId = session.username;
-  const filtered = receipts.filter((r) => r.tenant_id === tenantId);
+  const orgId = session.org_id || "default";
+  const filtered = listReceiptsByOrg(orgId);
 
   const limit = Math.min(
-    Math.max(1, parseInt(request.nextUrl.searchParams.get("limit") ?? "50", 10)),
+    Math.max(1, Number.parseInt(request.nextUrl.searchParams.get("limit") ?? "50", 10) || 50),
     200
   );
-  const offset = Math.max(0, parseInt(request.nextUrl.searchParams.get("offset") ?? "0", 10));
+  const offset = Math.max(0, Number.parseInt(request.nextUrl.searchParams.get("offset") ?? "0", 10) || 0);
   const paginated = filtered.slice(offset, offset + limit);
 
   return NextResponse.json({

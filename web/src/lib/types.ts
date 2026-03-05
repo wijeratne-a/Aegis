@@ -49,6 +49,7 @@ export interface VerifyResponse {
 
 export interface RegisterResponse {
   policy_commitment: string;
+  policy_storage_key?: string;
   anchor_url?: string;
   anchored_at?: string;
 }

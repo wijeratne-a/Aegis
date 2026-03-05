@@ -1,7 +1,9 @@
 //! Root CA and dynamic leaf certificate generation for TLS MITM.
 //! Agents must trust the Root CA via REQUESTS_CA_BUNDLE or NODE_EXTRA_CA_CERTS.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use lru::LruCache;
@@ -112,9 +114,12 @@ impl RootCa {
 
 /// Resolves server cert by forging a leaf for the SNI from ClientHello.
 /// Uses an LRU cache so the least-recently-used entry is evicted when capacity is reached.
+/// Rate-limited to 100 forges per 60 seconds for DoS mitigation.
 pub struct DynamicCertResolver {
     ca: Arc<RootCa>,
     cache: Arc<Mutex<LruCache<String, Arc<rustls::sign::CertifiedKey>>>>,
+    forge_count: AtomicU64,
+    last_reset: Mutex<Option<Instant>>,
 }
 
 impl Clone for DynamicCertResolver {
@@ -122,9 +127,14 @@ impl Clone for DynamicCertResolver {
         Self {
             ca: Arc::clone(&self.ca),
             cache: Arc::clone(&self.cache),
+            forge_count: AtomicU64::new(0),
+            last_reset: Mutex::new(None),
         }
     }
 }
+
+const FORGE_RATE_LIMIT: u64 = 100;
+const FORGE_RESET_INTERVAL: Duration = Duration::from_secs(60);
 
 impl DynamicCertResolver {
     pub fn new(ca: RootCa) -> Self {
@@ -133,6 +143,23 @@ impl DynamicCertResolver {
             cache: Arc::new(Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(CERT_CACHE_CAP).expect("non-zero cache cap"),
             ))),
+            forge_count: AtomicU64::new(0),
+            last_reset: Mutex::new(None),
+        }
+    }
+
+    fn reset_if_needed(&self) {
+        let now = Instant::now();
+        let mut last = match self.last_reset.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        let should_reset = last
+            .map(|t| now.duration_since(t) >= FORGE_RESET_INTERVAL)
+            .unwrap_or(true);
+        if should_reset {
+            self.forge_count.store(0, Ordering::Relaxed);
+            *last = Some(now);
         }
     }
 
@@ -142,6 +169,12 @@ impl DynamicCertResolver {
             return Some(Arc::clone(ck));
         }
         drop(cache);
+
+        self.reset_if_needed();
+        let count = self.forge_count.fetch_add(1, Ordering::Relaxed);
+        if count >= FORGE_RATE_LIMIT {
+            return None;
+        }
 
         let ck = Arc::new(self.ca.forge_leaf(sni).ok()?);
         let mut cache = self.cache.lock().ok()?;

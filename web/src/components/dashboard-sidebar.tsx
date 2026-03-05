@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { FileCode, Shield, Terminal } from "lucide-react";
+import { FileCode, FileSpreadsheet, Shield, Terminal } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
   { href: "/dashboard/policy", label: "Policy Builder", icon: Shield },
   { href: "/dashboard/verify", label: "Verification Playground", icon: FileCode },
+  { href: "/dashboard/compliance", label: "Compliance Exports", icon: FileSpreadsheet },
   { href: "/dashboard/sdk", label: "SDK Sandbox", icon: Terminal },
 ];
 

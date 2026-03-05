@@ -1,0 +1,20 @@
+Thanks for deploying Aegis.
+
+Security defaults in this chart are production-leaning:
+  - proxy ENFORCE_MODE defaults to "strict"
+  - verifier KEY_PROVIDER defaults to "env"
+  - pod/container securityContext and network policies are enabled by default
+
+Required next steps:
+  1. Provide verifier signing key material:
+     kubectl create secret generic {{ .Values.verifier.signingKeySecretName }} \
+       --from-literal=AEGIS_SIGNING_KEY_HEX=<64-byte-hex>
+  2. Configure SIEM exporter env values if you use the bundled OTel config:
+     - SIEM_OTLP_HTTP_ENDPOINT
+     - SIEM_OTLP_HTTP_TOKEN
+     - SPLUNK_HEC_ENDPOINT
+     - SPLUNK_HEC_TOKEN
+     - LOKI_ENDPOINT
+
+Optional:
+  - Enable proxy WAL forwarding sidecar by setting proxy.fluentBit.enabled=true

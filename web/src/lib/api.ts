@@ -52,7 +52,7 @@ export function useReceipts() {
 }
 
 type SessionResponse = {
-  user: { username: string; role: UserRole } | null;
+  user: { username: string; role: UserRole; org_id: string; auth_source: "demo" | "oidc" } | null;
 };
 
 export function useSession() {

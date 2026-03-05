@@ -12,6 +12,8 @@ dependencies = [
  "chrono",
  "dashmap",
  "futures-util",
+ "hex",
+ "hmac",
  "http",
  "http-body-util",
  "hyper",
@@ -27,11 +29,13 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-rustls",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

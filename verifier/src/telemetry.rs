@@ -1,8 +1,13 @@
-use std::sync::OnceLock;
+use std::{
+    collections::HashMap,
+    fmt as stdfmt,
+    sync::{Mutex, OnceLock},
+};
 
 use anyhow::Result;
 use opentelemetry::{
-    global, metrics::Counter, trace::TracerProvider as _, InstrumentationScope, KeyValue,
+    global, metrics::{Counter, Histogram}, trace::TracerProvider as _, InstrumentationScope,
+    KeyValue,
 };
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
@@ -17,14 +22,53 @@ struct Metrics {
     policy_violation: Counter<u64>,
     verification_success: Counter<u64>,
     identity_bound_verification: Counter<u64>,
+    violation_rate: Counter<u64>,
+    consecutive_violations: Histogram<u64>,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
+static CONSECUTIVE_VIOLATIONS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
-pub fn increment_policy_violation(domain: &str) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ViolationType {
+    UnknownPolicyCommitment,
+    PolicyDenied,
+    PolicyViolation,
+}
+
+impl ViolationType {
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::UnknownPolicyCommitment => "unknown_policy_commitment",
+            Self::PolicyDenied => "policy_denied",
+            Self::PolicyViolation => "policy_violation",
+        }
+    }
+}
+
+impl stdfmt::Display for ViolationType {
+    fn fmt(&self, f: &mut stdfmt::Formatter<'_>) -> stdfmt::Result {
+        f.write_str(self.as_label())
+    }
+}
+
+pub fn increment_policy_violation(domain: &str, violation_type: ViolationType) {
     if let Some(m) = METRICS.get() {
-        m.policy_violation
-            .add(1, &[KeyValue::new("domain", domain.to_string())]);
+        let labels = [
+            KeyValue::new("domain", domain.to_string()),
+            KeyValue::new("violation_type", violation_type.to_string()),
+        ];
+        m.policy_violation.add(1, &labels);
+        m.violation_rate.add(1, &labels);
+        let streak = {
+            let map = CONSECUTIVE_VIOLATIONS.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+            let key = format!("{domain}|{}", violation_type.as_label());
+            let next = guard.get(&key).copied().unwrap_or(0).saturating_add(1);
+            guard.insert(key, next);
+            next
+        };
+        m.consecutive_violations.record(streak, &labels);
     }
 }
 
@@ -87,6 +131,10 @@ pub fn init_telemetry() -> Result<()> {
             identity_bound_verification: meter
                 .u64_counter("aegis.identity_bound_verification")
                 .build(),
+            violation_rate: meter.u64_counter("aegis.verifier.violation_rate").build(),
+            consecutive_violations: meter
+                .u64_histogram("aegis.verifier.consecutive_violations")
+                .build(),
         });
 
         let init_result = if json_logs {
@@ -103,7 +151,7 @@ pub fn init_telemetry() -> Result<()> {
                 .try_init()
         };
         if let Err(err) = init_result {
-            return Err(anyhow::anyhow!(err.to_string()));
+            return Err(anyhow::anyhow!("{err}"));
         }
     } else {
         let init_result = if json_logs {
@@ -118,7 +166,7 @@ pub fn init_telemetry() -> Result<()> {
                 .try_init()
         };
         if let Err(err) = init_result {
-            return Err(anyhow::anyhow!(err.to_string()));
+            return Err(anyhow::anyhow!("{err}"));
         }
     }
 

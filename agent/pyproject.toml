@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegis-sdk"
+version = "0.1.0"
+description = "Aegis lightweight user-space SDK for proof-of-task tracing"
+requires-python = ">=3.10"
+dependencies = [
+  "requests",
+  "pydantic",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

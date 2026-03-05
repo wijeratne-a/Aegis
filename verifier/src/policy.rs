@@ -1,7 +1,8 @@
 use anyhow::Result;
 use regorus::{Engine as RegoEngineImpl, Value as RegoValue};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path};
+use std::{fs, path::Path, sync::Arc};
+use tokio::sync::Semaphore;
 
 use crate::schema::{VerifyRequest, MAX_EXECUTION_TRACE_LEN, MAX_STRING_LEN};
 
@@ -82,6 +83,7 @@ impl PolicyEngine for LegacyJsonEngine {
 /// each evaluation clones the pre-built engine to avoid re-parsing.
 pub struct RegoEngine {
     engine: RegoEngineImpl,
+    semaphore: Arc<Semaphore>,
 }
 
 impl RegoEngine {
@@ -96,12 +98,19 @@ impl RegoEngine {
         }
         let mut engine = RegoEngineImpl::new();
         engine.add_policy("aegis.rego".to_string(), source)?;
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            semaphore: Arc::new(Semaphore::new(64)),
+        })
     }
 }
 
 impl PolicyEngine for RegoEngine {
     fn evaluate(&self, request: &VerifyRequest) -> Result<PolicyDecision> {
+        let _permit = self
+            .semaphore
+            .try_acquire()
+            .map_err(|_| anyhow::anyhow!("policy evaluation limit reached"))?;
         if request.execution_trace.len() > MAX_EXECUTION_TRACE_LEN {
             return Ok(PolicyDecision {
                 allow: false,

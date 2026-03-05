@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { jwtVerify } from "jose";
+import { getToken } from "next-auth/jwt";
+import { ensureStartupValidation } from "@/lib/startup";
 
 const COOKIE_NAME = "aegis_session";
 
@@ -11,6 +13,8 @@ function getSecret() {
 }
 
 export async function middleware(request: NextRequest) {
+  ensureStartupValidation();
+
   if (!request.nextUrl.pathname.startsWith("/dashboard")) {
     return NextResponse.next();
   }
@@ -25,9 +29,17 @@ export async function middleware(request: NextRequest) {
   }
 
   try {
-    await jwtVerify(token, secret);
+    await jwtVerify(token, secret, { algorithms: ["HS256"] });
     return NextResponse.next();
   } catch {
+    const oidcToken = await getToken({
+      req: request,
+      secret: process.env.NEXTAUTH_SECRET ?? process.env.JWT_SECRET,
+    });
+    if (oidcToken) {
+      return NextResponse.next();
+    }
+
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("from", request.nextUrl.pathname);
     const response = NextResponse.redirect(loginUrl);

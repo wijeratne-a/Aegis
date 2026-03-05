@@ -1,0 +1,15 @@
+{{- if .Values.otelCollector.configMap.create }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.otelCollector.configMap.name | quote }}
+data:
+  config.yaml: |
+{{ tpl .Values.otelCollector.config . | indent 4 }}
+  collector.env: |
+    SIEM_OTLP_HTTP_ENDPOINT={{ .Values.otelCollector.env.siemOtlpHttpEndpoint }}
+    SIEM_OTLP_HTTP_TOKEN={{ .Values.otelCollector.env.siemOtlpHttpToken }}
+    SPLUNK_HEC_ENDPOINT={{ .Values.otelCollector.env.splunkHecEndpoint }}
+    SPLUNK_HEC_TOKEN={{ .Values.otelCollector.env.splunkHecToken }}
+    LOKI_ENDPOINT={{ .Values.otelCollector.env.lokiEndpoint }}
+{{- end }}

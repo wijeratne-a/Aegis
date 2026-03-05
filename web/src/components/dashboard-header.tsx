@@ -36,6 +36,9 @@ export function DashboardHeader() {
           <span className="flex items-center gap-2 text-sm">
             <User className="h-4 w-4" />
             {user.username}
+            <span className="font-mono text-xs text-muted-foreground">
+              {user.role}@{user.org_id}
+            </span>
           </span>
         ) : null}
         <Button variant="ghost" size="sm" onClick={handleLogout}>

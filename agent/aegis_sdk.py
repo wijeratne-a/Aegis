@@ -8,6 +8,7 @@ import threading
 import time
 import atexit
 import signal
+import os
 from pathlib import Path
 from dataclasses import dataclass
 from functools import wraps
@@ -30,6 +31,10 @@ class TraceEntryModel(BaseModel):
     amount: Optional[float] = None
     table: Optional[str] = None
     details: Optional[Dict[str, Any]] = None
+    reasoning_summary: Optional[str] = None
+    model_id: Optional[str] = None
+    instruction_hash: Optional[str] = None
+    parent_task_id: Optional[str] = None
 
 
 class PublicValuesModel(BaseModel):
@@ -45,6 +50,7 @@ class VerifyRequestModel(BaseModel):
     execution_trace: List[TraceEntryModel]
     public_values: PublicValuesModel
     identity_context: Optional[Dict[str, Optional[str]]] = None
+    task_token: Optional[str] = None
 
 
 @dataclass
@@ -55,18 +61,26 @@ class AegisResult:
 
 
 class AegisClient:
-    def __init__(self, base_url: str = "http://44.204.128.105", timeout: float = 3.0):
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url: Optional[str] = None, timeout: float = 3.0):
+        resolved_base_url = base_url or os.environ.get("AEGIS_BASE_URL", "http://127.0.0.1:3000")
+        if not resolved_base_url:
+            raise ValueError("base_url must be provided or AEGIS_BASE_URL must be set")
+        self.base_url = resolved_base_url.rstrip("/")
         self.timeout = timeout
         self.session = requests.Session()
 
-    def register_policy(self, policy: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> str:
+    def register_policy(
+        self, policy: Dict[str, Any], headers: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
         response = self.session.post(
             f"{self.base_url}/v1/register", json=policy, timeout=self.timeout, headers=headers
         )
         response.raise_for_status()
         data = response.json()
-        return data["policy_commitment"]
+        return {
+            "policy_commitment": data["policy_commitment"],
+            "task_token": data.get("task_token"),
+        }
 
     def verify(self, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> AegisResult:
         response = self.session.post(
@@ -90,6 +104,7 @@ class Aegis:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         iam_role: Optional[str] = None,
+        model_id: Optional[str] = None,
     ):
         self.client = AegisClient(base_url=base_url)
         self.batch_size = batch_size
@@ -97,6 +112,7 @@ class Aegis:
         self.wal_path = Path(wal_path)
 
         self.policy_commitment: Optional[str] = None
+        self.task_token: Optional[str] = None
         self.domain: str = "defi"
         self.version: str = "1.0"
         self.public_values: Dict[str, Any] = {}
@@ -105,6 +121,7 @@ class Aegis:
             "user_id": user_id,
             "iam_role": iam_role,
         }
+        self.model_id = model_id
 
         self._trace_queue: "queue.Queue[None]" = queue.Queue()
         self._result_queue: "queue.Queue[AegisResult]" = queue.Queue()
@@ -124,7 +141,9 @@ class Aegis:
         public_values: Dict[str, Any],
         version: str = "1.0",
     ) -> str:
-        self.policy_commitment = self.client.register_policy(policy, headers=self._identity_headers())
+        registration = self.client.register_policy(policy, headers=self._identity_headers())
+        self.policy_commitment = registration["policy_commitment"]
+        self.task_token = registration.get("task_token")
         self.domain = domain
         self.version = version
         self.public_values = public_values
@@ -179,6 +198,7 @@ class Aegis:
             "execution_trace": traces,
             "public_values": self.public_values,
             "identity_context": self.identity_context,
+            "task_token": self.task_token,
         }
         try:
             validated = VerifyRequestModel.model_validate(payload).model_dump(mode="json")
@@ -222,10 +242,15 @@ class Aegis:
 
     def _persist_wal_locked(self) -> None:
         self.wal_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.wal_path.with_suffix(".tmp")
         serialized = "\n".join(json.dumps(item) for item in self._pending_entries)
         if serialized:
             serialized += "\n"
-        self.wal_path.write_text(serialized, encoding="utf-8")
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.write(serialized)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, self.wal_path)
 
     def _flush_pending(self, force: bool) -> None:
         if not self.policy_commitment:
@@ -236,8 +261,8 @@ class Aegis:
                     return
                 if not force and len(self._pending_entries) < self.batch_size:
                     return
-                batch = self._pending_entries[: self.batch_size]
-            before_len = len(batch)
+                batch = list(self._pending_entries[: self.batch_size])
+                before_len = len(batch)
             sent = self._send_batch(batch)
             if not sent:
                 return
@@ -298,6 +323,10 @@ class Aegis:
             "result": _safe_json(result),
             "execution_ms": round(elapsed_ms, 3),
         }
+        reasoning_summary: Optional[str] = None
+        if "reasoning" in kwargs:
+            reasoning_summary = str(_safe_json(kwargs.get("reasoning")))
+            details["reasoning"] = reasoning_summary
 
         return {
             "action": action,
@@ -305,6 +334,10 @@ class Aegis:
             "amount": amount,
             "table": table,
             "details": details,
+            "reasoning_summary": reasoning_summary,
+            "model_id": self.model_id,
+            "instruction_hash": None,
+            "parent_task_id": None,
         }
 
 

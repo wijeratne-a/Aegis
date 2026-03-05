@@ -1,20 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { registerPolicySchema } from "@/lib/schemas";
 import { getSession } from "@/lib/auth";
-import { checkRateLimit } from "@/lib/rate-limit";
+import { checkRateLimit, getTrustedIdentifier } from "@/lib/rate-limit";
 import { blake3Commitment, publishCommitment } from "@/lib/anchor";
+import { ensureStartupValidation } from "@/lib/startup";
 
 const MAX_PAYLOAD_BYTES = 1024 * 1024; // 1MB
 const policies = new Map<string, unknown>();
 
+function policyStorageKey(orgId: string, commitment: string): string {
+  return `${orgId}:${commitment}`;
+}
+
 function getRateLimitKey(request: NextRequest, session: { username: string } | null): string {
   if (session?.username) return `register:${session.username}`;
-  const forwarded = request.headers.get("x-forwarded-for");
-  const ip = forwarded ? forwarded.split(",")[0]?.trim() : request.headers.get("x-real-ip");
-  return `register:${ip ?? "unknown"}`;
+  return getTrustedIdentifier(request, "register");
 }
 
 export async function POST(request: NextRequest) {
+  ensureStartupValidation();
+
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -52,16 +57,67 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  if (parsed.data.rego_policy !== undefined) {
+    const rego = parsed.data.rego_policy;
+    if (rego.length > 100000) {
+      return NextResponse.json(
+        { error: "Rego policy exceeds maximum size of 100KB" },
+        { status: 400 }
+      );
+    }
+    const forbidden =
+      /http\.send/.test(rego) ||
+      /crypto\.x509\.parse_certificates?/.test(rego) ||
+      /walk\s*\(/.test(rego);
+    if (forbidden) {
+      return NextResponse.json(
+        { error: "Rego policy contains forbidden pattern" },
+        { status: 400 }
+      );
+    }
+  }
+
   try {
     const commitment = await blake3Commitment(parsed.data);
+    const verifierUrl =
+      (process.env.VERIFIER_URL ?? "http://127.0.0.1:3000").replace(/\/$/, "") +
+      "/v1/register";
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (process.env.VERIFIER_API_KEY) {
+      headers["Authorization"] = `Bearer ${process.env.VERIFIER_API_KEY}`;
+    }
+    try {
+      const verifierRes = await fetch(verifierUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(parsed.data),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!verifierRes.ok) {
+        throw new Error("Verifier policy registration failed");
+      }
+    } catch (verifierErr) {
+      console.error("[api/register] verifier failed:", verifierErr);
+      return NextResponse.json(
+        { error: "Verifier policy registration failed" },
+        { status: 502 }
+      );
+    }
+    const orgId = session.org_id || "default";
+    const key = policyStorageKey(orgId, commitment);
     const anchor = await publishCommitment(commitment, {
       username: session.username,
+      org_id: orgId,
+      policy_storage_key: key,
       source: "dashboard-policy-builder",
     });
 
-    policies.set(commitment, parsed.data);
+    policies.set(key, parsed.data);
     return NextResponse.json({
       policy_commitment: commitment,
+      policy_storage_key: key,
       anchor_url: anchor.anchor_url,
       anchored_at: anchor.anchored_at,
     });

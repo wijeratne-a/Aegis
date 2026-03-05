@@ -12,10 +12,18 @@ spec:
       labels:
         app: aegis-verifier
     spec:
+      {{- if or .Values.verifier.serviceAccount.create .Values.verifier.serviceAccount.name }}
+      serviceAccountName: {{ .Values.verifier.serviceAccount.name | default "aegis-verifier" }}
+      {{- end }}
+      automountServiceAccountToken: {{ .Values.verifier.serviceAccount.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.verifier.podSecurityContext | nindent 8 }}
       containers:
         - name: verifier
           image: {{ .Values.verifier.image }}
           imagePullPolicy: IfNotPresent
+          securityContext:
+            {{- toYaml .Values.verifier.containerSecurityContext | nindent 12 }}
           ports:
             - containerPort: {{ .Values.verifier.port }}
           env:
@@ -31,9 +39,16 @@ spec:
               value: "json"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.otel.endpoint | quote }}
+            - name: AEGIS_SIGNING_KEY_HEX
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.verifier.signingKeySecretName | default .Values.secrets.signingKey.name | quote }}
+                  key: AEGIS_SIGNING_KEY_HEX
           volumeMounts:
             - name: policy-config
               mountPath: /etc/aegis/policies
+            - name: verifier-tmp
+              mountPath: /tmp
           readinessProbe:
             httpGet:
               path: /healthz
@@ -48,3 +63,5 @@ spec:
         - name: policy-config
           configMap:
             name: aegis-policy-config
+        - name: verifier-tmp
+          emptyDir: {}

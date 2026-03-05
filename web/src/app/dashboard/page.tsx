@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Shield, FileCode, Terminal, Activity, User } from "lucide-react";
+import { Shield, FileCode, Terminal, Activity, User, FileSpreadsheet } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -11,6 +11,7 @@ import type { PotReceipt } from "@/lib/types";
 const quickLinks = [
   { href: "/dashboard/policy", label: "Policy Builder", icon: Shield, desc: "Register policies and get policy commitments" },
   { href: "/dashboard/verify", label: "Verification Playground", icon: FileCode, desc: "Submit traces and view PoT receipts" },
+  { href: "/dashboard/compliance", label: "Compliance Dashboard", icon: FileSpreadsheet, desc: "Export org-scoped audit logs in JSON or CSV" },
   { href: "/dashboard/sdk", label: "SDK Sandbox", icon: Terminal, desc: "Copy Python SDK snippets for your project" },
 ];
 
@@ -133,7 +134,7 @@ export default function DashboardPage() {
 
       <RecentInterceptions />
 
-      <div className="mt-8 grid gap-4 md:grid-cols-3">
+      <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {quickLinks.map(({ href, label, icon: Icon, desc }) => (
           <Link key={href} href={href}>
             <Card className="transition-colors hover:bg-accent/50">

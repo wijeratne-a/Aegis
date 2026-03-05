@@ -16,9 +16,16 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd --gid 10001 aegis \
+    && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin aegis
+
 WORKDIR /app
 
 COPY --from=builder /app/target/release/aegis-api .
+RUN mkdir -p /tmp \
+    && chown -R 10001:10001 /app /tmp
 EXPOSE 3000
+
+USER 10001:10001
 
 ENTRYPOINT ["./aegis-api"]

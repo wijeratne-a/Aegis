@@ -16,6 +16,7 @@ const loginSchema = z.object({
   username: z.string().min(1, "Username is required"),
   password: z.string().min(1, "Password is required"),
 });
+const oidcEnabled = process.env.NEXT_PUBLIC_OIDC_ENABLED === "true";
 
 type LoginForm = z.infer<typeof loginSchema>;
 
@@ -55,6 +56,10 @@ function LoginFormInner() {
       const json = await res.json();
 
       if (!res.ok) {
+        if (typeof json.oidc_login_url === "string") {
+          window.location.href = json.oidc_login_url;
+          return;
+        }
         toast.error(json.error ?? "Login failed");
         return;
       }
@@ -108,9 +113,18 @@ function LoginFormInner() {
             <Button type="submit" className="w-full" disabled={isSubmitting}>
               {isSubmitting ? "Signing in..." : "Sign in"}
             </Button>
+            {oidcEnabled && (
+              <a href={`/api/auth/signin/oidc?callbackUrl=${encodeURIComponent(from)}`} className="block">
+                <Button type="button" variant="outline" className="w-full">
+                  Continue with SSO
+                </Button>
+              </a>
+            )}
           </form>
           <p className="mt-4 text-center text-sm text-muted-foreground">
-            Demo: any username and password will work.
+            {oidcEnabled
+              ? "Enterprise SSO is available. Demo credentials work only when ALLOW_DEMO_LOGIN is enabled."
+              : "Demo: any username and password will work."}
           </p>
         </CardContent>
       </Card>

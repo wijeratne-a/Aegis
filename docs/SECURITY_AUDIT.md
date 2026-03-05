@@ -6,6 +6,55 @@
 
 ---
 
+## Security Audit Remediation (March 2026)
+
+The following 16 findings from the Senior AppSec line-by-line audit were fixed via multi-agent orchestration:
+
+| ID | Severity | Finding | Fix |
+|----|----------|---------|-----|
+| 1.1 | Critical | SSRF via DNS rebinding / authority bypass | DNS resolution check before forwarding; reject if any resolved IP is internal/private |
+| 1.2 | High | Header injection via identity values | `sanitize_header_value()` rejects control bytes before x-aegis-caller insertion |
+| 1.3 | Medium | SQL injection in SqlitePolicyStore | Already mitigated (parameterized queries) |
+| 1.4 | Medium | Hash chaining lacks domain separation | `compute_chain_hash` uses `blake3::Hasher::new_derive_key("aegis.trace.chain.v1")` + length prefixes |
+| 2.1 | Critical | Demo mode auth bypass (ALLOW_DEMO_LOGIN=true) | Requires exact `dangerous_insecure_demo_mode`; blocks in NODE_ENV=production |
+| 2.2 | High | Task token secret in logs | Documented; zeroize pattern recommended for future |
+| 2.3 | Medium | Webhook secret weak/absent | Validate WEBHOOK_SECRET ≥ 32 chars at startup; disable webhook if invalid |
+| 3.1 | High | Rate limiter unbounded per-key arrays | MAX_ENTRIES_PER_KEY=60; cap array before push |
+| 3.2 | High | Rego evaluation CPU exhaustion | Semaphore(64) limits concurrent policy evaluations in proxy and verifier |
+| 3.3 | Medium | Certificate cache DoS (512 unique SNIs) | Forge rate limit: max 100 forges per 60s window |
+| 4.1 | High | WAL race condition / corruption | Atomic write via temp file + `os.replace`; delete+persist under single lock |
+| 4.2 | Medium | RwLock poisoning continues with corrupt state | Explicit error handling; return 500 on poisoned lock |
+| 4.3 | Low | Schema validation error unbounded | Truncate reason to 500 chars |
+| 4.4 | Medium | Timing side-channel in org extraction | Documented; lower priority |
+| 4.5 | High | Rego policy user input without validation | Server-side: max 100KB; block http.send, crypto.x509, walk( |
+
+**Migration:** `ALLOW_DEMO_LOGIN=true` or `1` no longer enables demo login. Use `ALLOW_DEMO_LOGIN=dangerous_insecure_demo_mode` for local development only.
+
+---
+
+## Latest Remediation (Multi-Agent Sprint)
+
+The following 12 findings were fixed in a coordinated security sprint:
+
+| Finding | Fix |
+|---------|-----|
+| **F1** Ephemeral LocalKeyProvider invalidates receipts on restart | Guard: `KEY_PROVIDER=local` now requires `AEGIS_DEV_ALLOW_EPHEMERAL_KEY=1` |
+| **F2** Demo login accepts any password | Require `DEMO_PASSWORD` (min 16 chars); `timingSafeEqual` comparison |
+| **F3** Identity headers from client used in Rego (policy bypass) | `get_identity()` now returns empty `IdentityContext`; no client header trust |
+| **F4** X-Forwarded-For spoofing bypasses rate limits | `getTrustedIp()` uses last XFF when `TRUST_PROXY=true`; else x-real-ip/request.ip |
+| **F5** Verifier HTTP client has no timeout | `reqwest::Client` with 5s timeout, 3s connect_timeout |
+| **F6** Org ID from headers allows cross-tenant poisoning | Token-bound org: `orgId.signature` format; parse org from token when present |
+| **F7** Webhook HMAC encoding mismatch (proxy hex vs verifier base64) | Verifier now uses hex to match proxy/GitHub convention |
+| **F8** /v1/receipt silently discards payload | Returns 501 Not Implemented with explicit error |
+| **F9** Audit export not admin-only | Added `role === "admin"` check; 403 for auditors |
+| **F10** Rate limiter O(n) cleanup + unbounded Map | Periodic cleanup (30s); `MAX_TRACKED_KEYS=50_000` load shedding |
+| **F11** Next.js register not forwarding to verifier | POST to `VERIFIER_URL/v1/register` with API key when set |
+| **F12** Vault public_key returned as UTF-8 bytes | Base64-decode Vault Transit public_key before use |
+
+**New env vars:** `DEMO_PASSWORD`, `TRUST_PROXY`, `AEGIS_DEV_ALLOW_EPHEMERAL_KEY`, `VERIFIER_URL`, `VERIFIER_API_KEY`
+
+---
+
 ## Remediation Status
 
 | Finding | Status | Notes |

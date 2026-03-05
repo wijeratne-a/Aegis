@@ -1,9 +1,16 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    cell::Cell,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use anyhow::Context;
 use axum::{
+    extract::connect_info::ConnectInfo,
     Json, Router,
     extract::{Request, State},
-    http::{header, Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -20,20 +27,32 @@ mod engine;
 mod keys;
 mod policy;
 mod schema;
+mod store;
 mod telemetry;
 
-use crate::engine::{report_receipt_if_configured, verify_trace};
+use crate::engine::{
+    issue_task_token, notify_policy_violation_if_configured, report_receipt_if_configured,
+    verify_trace,
+};
 use crate::keys::{build_key_provider, KeyProvider};
 use crate::policy::{build_policy_engine, PolicyEngine};
-use crate::schema::{ReceiptIngestResponse, RegisterResponse, VerifyRequest, VerifyResponse};
+use crate::schema::{AgentTaskToken, RegisterResponse, VerifyRequest, VerifyResponse};
+use crate::store::{build_policy_store, PolicyStore};
+
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const RATE_LIMIT_MAX: u32 = 60;
+const DEFAULT_TASK_TOKEN_TTL_SECS: i64 = 300;
+const DEFAULT_AGENT_ID: &str = "unknown-agent";
+const DEFAULT_TASK_ID: &str = "unknown-task";
 
 #[derive(Clone)]
 struct AppState {
-    policies: Arc<DashMap<String, Value>>,
+    policy_store: Arc<dyn PolicyStore>,
     key_provider: Arc<dyn KeyProvider>,
     policy_engine: Arc<dyn PolicyEngine>,
     http_client: reqwest::Client,
     api_key: Option<String>,
+    rate_limit: Arc<DashMap<String, (Instant, u32)>>,
 }
 
 #[derive(Debug)]
@@ -53,14 +72,9 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let expose = std::env::var("AEGIS_DEBUG")
-            .map(|v| v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let msg = if expose {
-            self.message
-        } else {
-            "Internal error".to_string()
-        };
+        let ref_id = uuid::Uuid::new_v4();
+        tracing::error!(ref_id = %ref_id, error = %self.message, "internal error");
+        let msg = format!("Internal error (ref: {})", ref_id);
         (
             self.status,
             Json(serde_json::json!({ "error": msg })),
@@ -70,6 +84,24 @@ impl IntoResponse for AppError {
 }
 
 type AppResult<T> = Result<T, AppError>;
+
+fn get_header_or_default(headers: &HeaderMap, name: &'static str, default: &'static str) -> String {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn task_token_ttl_secs() -> i64 {
+    std::env::var("TASK_TOKEN_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|s| *s > 0 && *s <= 86_400)
+        .unwrap_or(DEFAULT_TASK_TOKEN_TTL_SECS)
+}
 
 async fn api_key_middleware(
     State(state): State<AppState>,
@@ -111,6 +143,62 @@ async fn api_key_middleware(
     next.run(request).await
 }
 
+async fn rate_limit_middleware(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let addr = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let identifier = if state.api_key.is_some() {
+        let provided = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|s| s.as_bytes())
+            .or_else(|| {
+                request
+                    .headers()
+                    .get("x-api-key")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.as_bytes())
+            });
+        match provided {
+            Some(b) => blake3::hash(b).to_hex().to_string(),
+            None => addr,
+        }
+    } else {
+        addr
+    };
+
+    let now = Instant::now();
+    let allow = Cell::new(true);
+    state.rate_limit.entry(identifier.clone()).and_modify(|(window_start, count)| {
+        if now.duration_since(*window_start) > RATE_LIMIT_WINDOW {
+            *window_start = now;
+            *count = 1;
+        } else {
+            *count = count.saturating_add(1);
+            if *count > RATE_LIMIT_MAX {
+                allow.set(false);
+            }
+        }
+    }).or_insert_with(|| (now, 1));
+
+    if !allow.get() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "rate limit exceeded" })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
 fn build_cors_layer() -> CorsLayer {
     if let Ok(frontend_url) = std::env::var("FRONTEND_URL") {
         let mut origins: Vec<_> = vec![
@@ -134,7 +222,18 @@ fn build_cors_layer() -> CorsLayer {
             .allow_methods([Method::POST, Method::OPTIONS])
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
     } else {
-        CorsLayer::permissive()
+        let origins: Vec<_> = vec![
+            "http://localhost:3001"
+                .parse()
+                .expect("hardcoded origin"),
+            "http://127.0.0.1:3001"
+                .parse()
+                .expect("hardcoded origin"),
+        ];
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([Method::POST, Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
     }
 }
 
@@ -143,11 +242,16 @@ async fn main() -> anyhow::Result<()> {
     telemetry::init_telemetry()?;
 
     let state = AppState {
-        policies: Arc::new(DashMap::new()),
-        key_provider: build_key_provider()?,
+        policy_store: build_policy_store(),
+        key_provider: build_key_provider().await?,
         policy_engine: Arc::from(build_policy_engine()),
-        http_client: reqwest::Client::new(),
+        http_client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .build()
+            .context("failed to build http client")?,
         api_key: std::env::var("VERIFIER_API_KEY").ok(),
+        rate_limit: Arc::new(DashMap::new()),
     };
 
     let cors = build_cors_layer();
@@ -155,13 +259,17 @@ async fn main() -> anyhow::Result<()> {
     let protected = Router::new()
         .route("/v1/register", post(register_handler))
         .route("/v1/verify", post(verify_handler))
+        .route("/v1/receipt", post(receipt_ingest_handler))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
+        ))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             api_key_middleware,
         ));
 
     let app = Router::new()
-        .route("/v1/receipt", post(receipt_ingest_handler))
         .route("/healthz", get(healthz_handler))
         .merge(protected)
         .with_state(state)
@@ -173,9 +281,12 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("[aegis-api] listening on http://{addr}");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 
@@ -188,15 +299,38 @@ async fn shutdown_signal() {
 
 async fn register_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(policy): Json<Value>,
 ) -> AppResult<Json<RegisterResponse>> {
     let policy_bytes = serde_json::to_vec(&policy)
         .map_err(|e| AppError::internal(format!("failed to encode policy JSON: {e}")))?;
     let commitment = format!("0x{}", blake3::hash(&policy_bytes).to_hex());
 
-    state.policies.insert(commitment.clone(), policy);
+    state
+        .policy_store
+        .upsert_policy(&commitment, &policy)
+        .await
+        .map_err(|e| AppError::internal(format!("failed to persist policy: {e}")))?;
+
+    let task_token = std::env::var("TASK_TOKEN_SECRET")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(|secret| {
+            let payload = AgentTaskToken {
+                agent_id: get_header_or_default(&headers, "x-aegis-agent-id", DEFAULT_AGENT_ID),
+                task_id: get_header_or_default(&headers, "x-aegis-task-id", DEFAULT_TASK_ID),
+                policy_commitment: commitment.clone(),
+                exp: chrono::Utc::now().timestamp() + task_token_ttl_secs(),
+            };
+            issue_task_token(&secret, &payload)
+                .map_err(|e| AppError::internal(format!("failed to issue task token: {e}")))
+        })
+        .transpose()?;
+
     Ok(Json(RegisterResponse {
         policy_commitment: commitment,
+        task_token,
     }))
 }
 
@@ -212,7 +346,7 @@ async fn verify_handler(
         })?;
     let response = verify_trace(
         &request,
-        &state.policies,
+        state.policy_store.as_ref(),
         state.key_provider.as_ref(),
         state.policy_engine.as_ref(),
     )
@@ -221,15 +355,17 @@ async fn verify_handler(
     if let Err(err) = report_receipt_if_configured(&state.http_client, &response).await {
         eprintln!("[aegis-api] failed to report receipt: {err}");
     }
+    if let Err(err) = notify_policy_violation_if_configured(&state.http_client, &request, &response).await {
+        eprintln!("[aegis-api] failed to send policy violation webhook: {err}");
+    }
     Ok(Json(response))
 }
 
-async fn receipt_ingest_handler(
-    Json(_receipt): Json<Value>,
-) -> AppResult<Json<ReceiptIngestResponse>> {
-    Ok(Json(ReceiptIngestResponse {
-        status: "ok".to_string(),
-    }))
+async fn receipt_ingest_handler(Json(_receipt): Json<Value>) -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({ "error": "receipt ingest not implemented" })),
+    )
 }
 
 async fn healthz_handler() -> AppResult<Json<Value>> {

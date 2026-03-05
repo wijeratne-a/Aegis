@@ -1,8 +1,13 @@
-use std::sync::OnceLock;
+use std::{
+    collections::HashMap,
+    fmt as stdfmt,
+    sync::{Mutex, OnceLock},
+};
 
 use anyhow::Result;
 use opentelemetry::{
-    global, metrics::Counter, trace::TracerProvider as _, InstrumentationScope, KeyValue,
+    global, metrics::{Counter, Histogram}, trace::TracerProvider as _, InstrumentationScope,
+    KeyValue,
 };
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
@@ -17,9 +22,41 @@ struct Metrics {
     request: Counter<u64>,
     blocked: Counter<u64>,
     timeout: Counter<u64>,
+    violation_rate: Counter<u64>,
+    consecutive_violations: Histogram<u64>,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
+static CONSECUTIVE_VIOLATIONS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ViolationType {
+    SchemaValidation,
+    ResponseInjection,
+    SensitiveDataExposure,
+    UnauthorizedDataMutation,
+    MissingAuditTrace,
+    PolicyViolation,
+}
+
+impl ViolationType {
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::SchemaValidation => "schema_validation",
+            Self::ResponseInjection => "response_injection",
+            Self::SensitiveDataExposure => "sensitive_data_exposure",
+            Self::UnauthorizedDataMutation => "unauthorized_data_mutation",
+            Self::MissingAuditTrace => "missing_audit_trace",
+            Self::PolicyViolation => "policy_violation",
+        }
+    }
+}
+
+impl stdfmt::Display for ViolationType {
+    fn fmt(&self, f: &mut stdfmt::Formatter<'_>) -> stdfmt::Result {
+        f.write_str(self.as_label())
+    }
+}
 
 pub fn increment_request(host: &str) {
     if let Some(m) = METRICS.get() {
@@ -28,15 +65,27 @@ pub fn increment_request(host: &str) {
     }
 }
 
-pub fn increment_blocked(host: &str, reason: &str) {
+pub fn increment_blocked(host: &str, violation_type: ViolationType) {
     if let Some(m) = METRICS.get() {
+        let labels = [
+            KeyValue::new("host", host.to_string()),
+            KeyValue::new("violation_type", violation_type.to_string()),
+        ];
         m.blocked.add(
             1,
-            &[
-                KeyValue::new("host", host.to_string()),
-                KeyValue::new("reason", reason.to_string()),
-            ],
+            &labels,
         );
+        m.violation_rate.add(1, &labels);
+
+        let streak = {
+            let map = CONSECUTIVE_VIOLATIONS.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+            let key = format!("{host}|{}", violation_type.as_label());
+            let next = guard.get(&key).copied().unwrap_or(0).saturating_add(1);
+            guard.insert(key, next);
+            next
+        };
+        m.consecutive_violations.record(streak, &labels);
     }
 }
 
@@ -93,6 +142,10 @@ pub fn init_telemetry() -> Result<()> {
             request: meter.u64_counter("aegis.proxy.request").build(),
             blocked: meter.u64_counter("aegis.proxy.blocked").build(),
             timeout: meter.u64_counter("aegis.proxy.timeout").build(),
+            violation_rate: meter.u64_counter("aegis.proxy.violation_rate").build(),
+            consecutive_violations: meter
+                .u64_histogram("aegis.proxy.consecutive_violations")
+                .build(),
         });
 
         let init_result = if json_logs {
@@ -109,7 +162,7 @@ pub fn init_telemetry() -> Result<()> {
                 .try_init()
         };
         if let Err(err) = init_result {
-            return Err(anyhow::anyhow!(err.to_string()));
+            return Err(anyhow::anyhow!("{err}"));
         }
     } else {
         let init_result = if json_logs {
@@ -124,7 +177,7 @@ pub fn init_telemetry() -> Result<()> {
                 .try_init()
         };
         if let Err(err) = init_result {
-            return Err(anyhow::anyhow!(err.to_string()));
+            return Err(anyhow::anyhow!("{err}"));
         }
     }
 

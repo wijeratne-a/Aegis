@@ -3,8 +3,15 @@ receivers:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  fluentforward:
+    endpoint: 0.0.0.0:24224
 
 processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
   batch:
     timeout: 5s
 
@@ -13,14 +20,27 @@ exporters:
     endpoint: 0.0.0.0:8889
   debug:
     verbosity: basic
+  otlphttp/siem:
+    endpoint: ${env:SIEM_OTLP_HTTP_ENDPOINT}
+    headers:
+      Authorization: Bearer ${env:SIEM_OTLP_HTTP_TOKEN}
+  splunk_hec:
+    endpoint: ${env:SPLUNK_HEC_ENDPOINT}
+    token: ${env:SPLUNK_HEC_TOKEN}
+  loki:
+    endpoint: ${env:LOKI_ENDPOINT}
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [debug]
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlphttp/siem]
     metrics:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [prometheus]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, otlphttp/siem]
+    logs:
+      receivers: [otlp, fluentforward]
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlphttp/siem, splunk_hec, loki]

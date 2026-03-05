@@ -18,6 +18,8 @@ fn check_string_len(s: &str, field: &str) -> Result<(), String> {
 #[serde(deny_unknown_fields)]
 pub struct RegisterResponse {
     pub policy_commitment: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +37,14 @@ pub struct TraceEntry {
     pub amount: Option<f64>,
     pub table: Option<String>,
     pub details: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +70,16 @@ pub struct VerifyRequest {
     pub execution_trace: Vec<TraceEntry>,
     pub public_values: PublicValues,
     pub identity_context: Option<IdentityContext>,
+    pub task_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTaskToken {
+    pub agent_id: String,
+    pub task_id: String,
+    pub policy_commitment: String,
+    pub exp: i64,
 }
 
 impl VerifyRequest {
@@ -73,11 +93,26 @@ impl VerifyRequest {
         check_string_len(&self.agent_metadata.domain, "agent_metadata.domain")?;
         check_string_len(&self.agent_metadata.version, "agent_metadata.version")?;
         check_string_len(&self.policy_commitment, "policy_commitment")?;
+        if let Some(ref token) = self.task_token {
+            check_string_len(token, "task_token")?;
+        }
         for (i, entry) in self.execution_trace.iter().enumerate() {
             check_string_len(&entry.action, &format!("execution_trace[{i}].action"))?;
             check_string_len(&entry.target, &format!("execution_trace[{i}].target"))?;
             if let Some(ref t) = entry.table {
                 check_string_len(t, &format!("execution_trace[{i}].table"))?;
+            }
+            if let Some(ref s) = entry.reasoning_summary {
+                check_string_len(s, &format!("execution_trace[{i}].reasoning_summary"))?;
+            }
+            if let Some(ref s) = entry.model_id {
+                check_string_len(s, &format!("execution_trace[{i}].model_id"))?;
+            }
+            if let Some(ref s) = entry.instruction_hash {
+                check_string_len(s, &format!("execution_trace[{i}].instruction_hash"))?;
+            }
+            if let Some(ref s) = entry.parent_task_id {
+                check_string_len(s, &format!("execution_trace[{i}].parent_task_id"))?;
             }
             if let Some(ref d) = entry.details {
                 let s = serde_json::to_string(d).map_err(|e| e.to_string())?;

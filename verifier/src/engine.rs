@@ -1,19 +1,33 @@
 use std::fmt::Write;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use dashmap::DashMap;
+use constant_time_eq::constant_time_eq;
+use hmac::{Hmac, Mac};
 use serde::Serialize;
-use serde_json::Value;
-use tracing::{info, info_span, warn};
+use sha2::Sha256;
+use tracing::{error, info, info_span, warn};
 use uuid::Uuid;
 
 use crate::{
     keys::KeyProvider,
     policy::{identity_hash, PolicyEngine},
-    schema::{PotReceipt, VerifyRequest, VerifyResponse},
+    schema::{AgentTaskToken, PotReceipt, VerifyRequest, VerifyResponse},
+    store::PolicyStore,
     telemetry,
 };
+
+fn classify_violation(reason: &str) -> telemetry::ViolationType {
+    let reason_lc = reason.to_ascii_lowercase();
+    if reason_lc.contains("unknown policy commitment") {
+        telemetry::ViolationType::UnknownPolicyCommitment
+    } else if reason_lc.contains("denied") {
+        telemetry::ViolationType::PolicyDenied
+    } else {
+        telemetry::ViolationType::PolicyViolation
+    }
+}
 
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -33,9 +47,59 @@ struct UnsignedReceipt<'a> {
     timestamp_ns: i64,
 }
 
+fn sign_task_token_hex(secret: &str, payload_segment: &str) -> Result<String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .context("TASK_TOKEN_SECRET is invalid for HMAC")?;
+    mac.update(payload_segment.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+pub fn issue_task_token(secret: &str, payload: &AgentTaskToken) -> Result<String> {
+    let payload_json =
+        serde_json::to_vec(payload).context("failed to serialize task token payload")?;
+    let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json);
+    let signature = sign_task_token_hex(secret, &payload_b64)?;
+    Ok(format!("{payload_b64}.{signature}"))
+}
+
+fn parse_and_validate_task_token(secret: &str, token: &str) -> Result<AgentTaskToken> {
+    let mut parts = token.split('.');
+    let payload_b64 = parts
+        .next()
+        .filter(|p| !p.is_empty())
+        .context("invalid task token format")?;
+    let signature = parts
+        .next()
+        .filter(|p| !p.is_empty())
+        .context("invalid task token format")?;
+    if parts.next().is_some() {
+        bail!("invalid task token format");
+    }
+    if signature.len() != 64 || !signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("invalid task token signature format");
+    }
+
+    let expected_sig = sign_task_token_hex(secret, payload_b64)?;
+    let a = expected_sig.as_bytes();
+    let b = signature.as_bytes();
+    if a.len() != b.len() || !constant_time_eq(a, b) {
+        bail!("invalid task token signature");
+    }
+
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .context("invalid task token payload encoding")?;
+    let payload: AgentTaskToken =
+        serde_json::from_slice(&payload_bytes).context("invalid task token payload")?;
+    if payload.exp <= Utc::now().timestamp() {
+        bail!("task token expired");
+    }
+    Ok(payload)
+}
+
 pub async fn verify_trace(
     request: &VerifyRequest,
-    policy_store: &DashMap<String, Value>,
+    policy_store: &dyn PolicyStore,
     key_provider: &dyn KeyProvider,
     policy_engine: &dyn PolicyEngine,
 ) -> Result<VerifyResponse> {
@@ -49,10 +113,49 @@ pub async fn verify_trace(
     );
     let _span_guard = verify_span.enter();
 
-    if !policy_store.contains_key(&request.policy_commitment) {
+    if !policy_store.has_policy(&request.policy_commitment).await? {
         warn!(policy_commitment=%request.policy_commitment, "unknown policy commitment");
-        telemetry::increment_policy_violation(&request.agent_metadata.domain);
+        telemetry::increment_policy_violation(
+            &request.agent_metadata.domain,
+            telemetry::ViolationType::UnknownPolicyCommitment,
+        );
         return Ok(invalid("unknown policy commitment"));
+    }
+
+    if let Ok(secret_raw) = std::env::var("TASK_TOKEN_SECRET") {
+        let secret = secret_raw.trim();
+        if !secret.is_empty() {
+            let Some(task_token) = request.task_token.as_deref() else {
+                telemetry::increment_policy_violation(
+                    &request.agent_metadata.domain,
+                    telemetry::ViolationType::PolicyViolation,
+                );
+                return Ok(invalid("missing task token"));
+            };
+            let payload = match parse_and_validate_task_token(secret, task_token) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    warn!(error=%err, "task token rejected");
+                    telemetry::increment_policy_violation(
+                        &request.agent_metadata.domain,
+                        telemetry::ViolationType::PolicyViolation,
+                    );
+                    return Ok(invalid("invalid or expired task token"));
+                }
+            };
+            if payload.policy_commitment != request.policy_commitment {
+                warn!(
+                    token_policy_commitment=%payload.policy_commitment,
+                    request_policy_commitment=%request.policy_commitment,
+                    "task token policy commitment mismatch"
+                );
+                telemetry::increment_policy_violation(
+                    &request.agent_metadata.domain,
+                    telemetry::ViolationType::PolicyViolation,
+                );
+                return Ok(invalid("task token policy commitment mismatch"));
+            }
+        }
     }
 
     let decision = policy_engine.evaluate(request)?;
@@ -62,7 +165,14 @@ pub async fn verify_trace(
             reason=?decision.reason,
             "policy denied request"
         );
-        telemetry::increment_policy_violation(&request.agent_metadata.domain);
+        let denial_reason = decision
+            .reason
+            .as_deref()
+            .unwrap_or("policy denied request");
+        telemetry::increment_policy_violation(
+            &request.agent_metadata.domain,
+            classify_violation(denial_reason),
+        );
         return Ok(invalid(
             decision.reason.unwrap_or_else(|| "policy denied request".to_string()),
         ));
@@ -138,6 +248,81 @@ fn invalid(reason: impl Into<String>) -> VerifyResponse {
     }
 }
 
+#[derive(Serialize)]
+struct PolicyViolationWebhook<'a> {
+    event: &'a str,
+    policy_commitment: &'a str,
+    domain: &'a str,
+    reason: &'a str,
+    timestamp_ns: i64,
+}
+
+pub async fn notify_policy_violation_if_configured(
+    client: &reqwest::Client,
+    request: &VerifyRequest,
+    response: &VerifyResponse,
+) -> Result<()> {
+    if response.valid {
+        return Ok(());
+    }
+    let webhook_url = match std::env::var("WEBHOOK_URL") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return Ok(()),
+    };
+    let secret = std::env::var("WEBHOOK_SECRET")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if secret.as_ref().map_or(false, |s| s.len() < 32) {
+        error!("WEBHOOK_SECRET must be at least 32 characters when WEBHOOK_URL is set; webhook disabled");
+        return Ok(());
+    }
+    let reason = response.reason.as_deref().unwrap_or("policy denied request");
+    send_policy_violation_webhook(
+        client,
+        &webhook_url,
+        secret.as_deref(),
+        &PolicyViolationWebhook {
+            event: "policy_violation_denied",
+            policy_commitment: &request.policy_commitment,
+            domain: &request.agent_metadata.domain,
+            reason,
+            timestamp_ns: Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        },
+    )
+    .await
+}
+
+async fn send_policy_violation_webhook(
+    client: &reqwest::Client,
+    webhook_url: &str,
+    webhook_secret: Option<&str>,
+    payload: &PolicyViolationWebhook<'_>,
+) -> Result<()> {
+    let body = serde_json::to_vec(payload).context("failed to encode webhook payload")?;
+    let mut request = client
+        .post(webhook_url)
+        .header("content-type", "application/json")
+        .body(body.clone());
+
+    if let Some(secret) = webhook_secret {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+            .context("WEBHOOK_SECRET is invalid for HMAC")?;
+        mac.update(&body);
+        let signature = hex::encode(mac.finalize().into_bytes());
+        request = request.header("x-aegis-signature", format!("sha256={signature}"));
+    }
+
+    let res = request
+        .send()
+        .await
+        .context("failed to send policy violation webhook")?;
+    if !res.status().is_success() {
+        warn!("policy violation webhook responded with {}", res.status());
+    }
+    Ok(())
+}
+
 pub async fn report_receipt_if_configured(
     client: &reqwest::Client,
     response: &VerifyResponse,
@@ -160,4 +345,65 @@ pub async fn report_receipt_if_configured(
         warn!("cloud receipt ingest responded with {}", res.status());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{AgentMetadata, PublicValues};
+    use httpmock::Method::POST;
+    use httpmock::MockServer;
+
+    #[tokio::test]
+    async fn sends_webhook_with_signature() {
+        let server = MockServer::start_async().await;
+        let webhook = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/hook")
+                    .header_exists("x-aegis-signature")
+                    .body_contains("\"event\":\"policy_violation_denied\"")
+                    .body_contains("\"policy_commitment\":\"0xabc\"");
+                then.status(202);
+            })
+            .await;
+
+        let client = reqwest::Client::new();
+        let request = VerifyRequest {
+            agent_metadata: AgentMetadata {
+                domain: "defi".to_string(),
+                version: "1.0".to_string(),
+            },
+            policy_commitment: "0xabc".to_string(),
+            execution_trace: vec![],
+            public_values: PublicValues {
+                max_spend: None,
+                restricted_endpoints: None,
+            },
+            identity_context: None,
+            task_token: None,
+        };
+        let response = VerifyResponse {
+            valid: false,
+            reason: Some("denied".to_string()),
+            proof: None,
+        };
+
+        send_policy_violation_webhook(
+            &client,
+            &format!("{}/hook", server.base_url()),
+            Some("super-secret"),
+            &PolicyViolationWebhook {
+                event: "policy_violation_denied",
+                policy_commitment: &request.policy_commitment,
+                domain: &request.agent_metadata.domain,
+                reason: response.reason.as_deref().unwrap_or("policy denied request"),
+                timestamp_ns: 1,
+            },
+        )
+        .await
+        .expect("webhook send");
+
+        webhook.assert_async().await;
+    }
 }

@@ -53,7 +53,8 @@ export async function publishCommitment(
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Failed to publish anchor: ${text}`);
+    console.error("[anchor] GitHub API error:", res.status, text);
+    throw new Error("Failed to publish anchor");
   }
 
   return {

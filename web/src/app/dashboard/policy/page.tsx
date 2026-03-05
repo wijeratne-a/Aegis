@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -24,12 +24,18 @@ const policyFormSchema = z.object({
 type PolicyForm = z.infer<typeof policyFormSchema>;
 
 export default function PolicyBuilderPage() {
-  const { policyCommitment, setPolicyCommitment } = usePolicyStore();
+  const { policyCommitment, policyStorageKey, setPolicyCommitment, setPolicyStorageKey, setActiveOrgId } =
+    usePolicyStore();
   const registerMutation = useRegisterPolicy();
   const sessionQuery = useSession();
   const isAuditor = sessionQuery.data?.role === "auditor";
+  const orgId = sessionQuery.data?.org_id ?? "default";
   const anchorUrl = registerMutation.data?.anchor_url;
   const anchoredAt = registerMutation.data?.anchored_at;
+
+  useEffect(() => {
+    setActiveOrgId(orgId);
+  }, [orgId, setActiveOrgId]);
 
   const {
     register,
@@ -72,7 +78,8 @@ export default function PolicyBuilderPage() {
 
     try {
       const result = await registerMutation.mutateAsync(payload);
-      setPolicyCommitment(result.policy_commitment);
+      setPolicyCommitment(result.policy_commitment, orgId);
+      setPolicyStorageKey(result.policy_storage_key ?? null, orgId);
       toast.success("Policy registered successfully");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Registration failed");
@@ -205,6 +212,14 @@ export default function PolicyBuilderPage() {
             </div>
             {anchorUrl && (
               <div className="mt-4 space-y-1 text-sm">
+                {policyStorageKey && (
+                  <>
+                    <p className="text-muted-foreground">Policy Storage Key</p>
+                    <code className="block break-all rounded bg-muted/50 px-2 py-1 font-mono text-xs">
+                      {policyStorageKey}
+                    </code>
+                  </>
+                )}
                 <p className="text-muted-foreground">Public Anchor</p>
                 <a
                   href={anchorUrl}

@@ -8,6 +8,7 @@ const inter = Inter({
 import { ThemeProvider } from "next-themes";
 import { QueryProvider } from "@/components/query-provider";
 import { Toaster } from "sonner";
+import { ensureStartupValidation } from "@/lib/startup";
 import "./globals.css";
 
 const jetbrainsMono = JetBrains_Mono({
@@ -25,6 +26,8 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  ensureStartupValidation();
+
   return (
     <html lang="en" className="dark" suppressHydrationWarning>
       <body className={`${inter.variable} ${jetbrainsMono.variable} font-sans antialiased`}>

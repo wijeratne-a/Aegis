@@ -18,9 +18,11 @@ use std::io::Cursor;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, info_span, warn};
+use uuid::Uuid;
 
 use crate::telemetry;
 use crate::trace_log::TraceLogger;
+use crate::webhook::{self, WebhookEvent};
 
 /// HTTP/1.x method prefixes. If the decrypted stream doesn't start with one of these, it's not HTTP.
 const HTTP_METHOD_PREFIXES: &[&[u8]] = &[
@@ -99,6 +101,11 @@ impl<R: AsyncWrite + Unpin> AsyncWrite for PrependReader<R> {
     }
 }
 
+/// Rejects values containing bytes < 0x20 or 0x7f (control chars). Returns true if safe to use in headers.
+fn sanitize_header_value(s: &str) -> bool {
+    !s.bytes().any(|b| b < 0x20 || b == 0x7f)
+}
+
 fn is_internal_or_private(authority: &str) -> bool {
     let host = authority.split(':').next().unwrap_or(authority).trim();
     let host_lower = host.to_lowercase();
@@ -115,6 +122,40 @@ fn is_internal_or_private(authority: &str) -> bool {
         };
     }
     false
+}
+
+/// Returns true if any resolved IP for the host is loopback, private, or link-local (SSRF unsafe).
+/// Uses tokio::net::lookup_host for async DNS resolution. Fails closed on resolution errors.
+async fn host_resolves_to_unsafe_ip(host: &str) -> Result<bool> {
+    let host = host.split(':').next().unwrap_or(host).trim();
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost" || host_lower.ends_with(".local") {
+        return Ok(true);
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let unsafe_ip = ip.is_loopback()
+            || match ip {
+                IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+                IpAddr::V6(v6) => v6.is_unicast_link_local(),
+            };
+        return Ok(unsafe_ip);
+    }
+    let addrs = match tokio::net::lookup_host(format!("{host}:443")).await {
+        Ok(iter) => iter.collect::<Vec<_>>(),
+        Err(_) => return Ok(true), // fail closed: block on resolution failure
+    };
+    if addrs.is_empty() {
+        return Ok(true); // no addresses = treat as unsafe
+    }
+    let any_unsafe = addrs.iter().any(|addr| {
+        let ip = addr.ip();
+        ip.is_loopback()
+            || match ip {
+                IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+                IpAddr::V6(v6) => v6.is_unicast_link_local(),
+            }
+    });
+    Ok(any_unsafe)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,24 +225,40 @@ pub struct PayloadRegoInput {
     pub identity: IdentityContext,
 }
 
+/// Input shape for Rego response policy evaluation.
 #[derive(Debug, Clone, Serialize)]
-struct ProxyTraceLogEntry {
+pub struct ResponseRegoInput {
+    pub method: String,
+    pub path: String,
+    pub host: String,
+    pub status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub headers: std::collections::HashMap<String, String>,
+}
+
+/// Sanitized trace log entry for writing to disk; omits PII (session_id, user_id, iam_role).
+#[derive(Debug, Clone, Serialize)]
+struct ProxyTraceLogEntrySanitized {
     timestamp_ns: i64,
+    request_id: String,
     method: String,
     target: String,
     blocked: bool,
     enforce_mode: String,
     enforcement: String,
-    identity: IdentityContext,
+    has_identity: bool,
 }
 
 #[derive(Clone)]
 pub struct ProxyState {
     pub config: Arc<ProxyConfig>,
+    pub webhook: Option<crate::webhook::WebhookConfig>,
     pub logger: TraceLogger,
     pub client: reqwest::Client,
     pub mitm_server_config: Arc<ServerConfig>,
     pub payload_engine: Option<Arc<crate::payload_policy::PayloadPolicyEngine>>,
+    pub response_policy_engine: Option<Arc<crate::payload_policy::ResponsePolicyEngine>>,
     pub schema_registry: Option<Arc<crate::schema_validator::SchemaRegistry>>,
     /// Root CA PEM for GET /ca (loopback only). Used for agent trust setup.
     pub ca_pem: Option<String>,
@@ -215,6 +272,70 @@ pub struct LivePolicy {
 }
 
 pub type ProxyBody = Full<bytes::Bytes>;
+
+fn generate_request_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn redact_query_from_target(target: &str) -> String {
+    target
+        .parse::<Uri>()
+        .ok()
+        .and_then(|uri| {
+            let scheme = uri.scheme_str()?;
+            let authority = uri.authority()?.as_str();
+            let path = uri.path();
+            Some(format!("{scheme}://{authority}{path}"))
+        })
+        .unwrap_or_else(|| {
+            target
+                .split_once('?')
+                .map(|(prefix, _)| prefix.to_string())
+                .unwrap_or_else(|| target.to_string())
+        })
+}
+
+fn insert_request_id_header(headers: &mut http::HeaderMap<HeaderValue>, request_id: &str) {
+    if let Ok(value) = HeaderValue::from_str(request_id) {
+        headers.insert("X-Aegis-Request-Id", value);
+    }
+}
+
+fn append_trace_entry(
+    state: &ProxyState,
+    request_id: String,
+    method: &Method,
+    target: &str,
+    blocked: bool,
+    enforcement: &str,
+    has_identity: bool,
+) {
+    let trace_entry = ProxyTraceLogEntrySanitized {
+        timestamp_ns: Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        request_id,
+        method: method.as_str().to_string(),
+        target: redact_query_from_target(target),
+        blocked,
+        enforce_mode: state.config.enforce_mode.as_str().to_string(),
+        enforcement: enforcement.to_string(),
+        has_identity,
+    };
+    let logger = state.logger.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(err) = logger.append(&trace_entry) {
+            warn!("failed writing proxy trace log: {err}");
+        }
+    });
+}
+
+fn emit_webhook_event(state: &ProxyState, event: WebhookEvent) {
+    if let Some(config) = state.webhook.clone() {
+        let client = state.client.clone();
+        tokio::spawn(async move {
+            webhook::emit(&client, &config, &event).await;
+        });
+    }
+}
 
 fn response_with(status: StatusCode, body: &str) -> Response<ProxyBody> {
     Response::builder()
@@ -292,18 +413,13 @@ fn headers_to_map(headers: &http::HeaderMap<HeaderValue>) -> std::collections::H
     map
 }
 
-fn get_identity(headers: &http::HeaderMap<HeaderValue>) -> IdentityContext {
-    let header_to_string = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty())
-    };
+/// Returns empty identity. Identity must come from a verified token in future implementation.
+/// Client-supplied headers are untrusted and would allow policy bypass - do not read them.
+fn get_identity(_headers: &http::HeaderMap<HeaderValue>) -> IdentityContext {
     IdentityContext {
-        session_id: header_to_string("x-aegis-session-id"),
-        user_id: header_to_string("x-aegis-user-id"),
-        iam_role: header_to_string("x-aegis-iam-role"),
+        session_id: None,
+        user_id: None,
+        iam_role: None,
     }
 }
 
@@ -312,6 +428,29 @@ fn should_block(target: &str, policy: &PolicyConfig) -> bool {
         .restricted_endpoints
         .iter()
         .any(|blocked| !blocked.is_empty() && target.contains(blocked))
+}
+
+fn classify_violation(reason: &str) -> telemetry::ViolationType {
+    let reason_lc = reason.to_ascii_lowercase();
+    if reason_lc.contains("schema") {
+        telemetry::ViolationType::SchemaValidation
+    } else if reason_lc.contains("response injection")
+        || reason_lc.contains("response_injection")
+        || reason_lc.contains("responseinjection")
+    {
+        telemetry::ViolationType::ResponseInjection
+    } else if reason_lc.contains("ssn") || reason_lc.contains("sensitive") {
+        telemetry::ViolationType::SensitiveDataExposure
+    } else if reason_lc.contains("readonly")
+        || reason_lc.contains("read-only")
+        || reason_lc.contains("delete mutation")
+    {
+        telemetry::ViolationType::UnauthorizedDataMutation
+    } else if reason_lc.contains("x-aegis-trace") || reason_lc.contains("audit") {
+        telemetry::ViolationType::MissingAuditTrace
+    } else {
+        telemetry::ViolationType::PolicyViolation
+    }
 }
 
 pub async fn handle(
@@ -338,26 +477,32 @@ pub async fn handle(
             ));
         }
         if (path == "/ca" || path == "/.well-known/ca.crt")
-            && state.ca_pem.is_some()
             && remote_addr.ip().is_loopback()
         {
-            return Ok(Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", "application/x-pem-file")
-                .body(Full::new(bytes::Bytes::from(
-                    state.ca_pem.as_ref().unwrap().clone(),
-                )))
-                .unwrap_or_else(|_| response_500()));
+            if let Some(ca) = state.ca_pem.as_ref() {
+                return Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/x-pem-file")
+                    .body(Full::new(bytes::Bytes::from(ca.clone())))
+                    .unwrap_or_else(|_| response_500()));
+            }
         }
         if path == "/policy/current" && remote_addr.ip().is_loopback() {
-            let policy_hash = {
-                let live = state.live_policy.read().unwrap_or_else(|e| e.into_inner());
-                let raw = serde_json::to_vec(&live.config).unwrap_or_default();
-                format!("0x{}", blake3::hash(&raw).to_hex())
+            let live = match state.live_policy.read() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    error!("RwLock poisoned for live_policy: {}", e);
+                    return Ok(response_with(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        r#"{"error":"policy state unavailable"}"#,
+                    ));
+                }
             };
+            let raw = serde_json::to_vec(&live.config).unwrap_or_default();
+            let policy_hash = format!("0x{}", blake3::hash(&raw).to_hex());
             let body = serde_json::json!({
                 "policy_hash": policy_hash,
-                "has_rego_engine": state.live_policy.read().unwrap_or_else(|e| e.into_inner()).payload_engine.is_some(),
+                "has_rego_engine": live.payload_engine.is_some(),
             });
             return Ok(response_with(StatusCode::OK, &body.to_string()));
         }
@@ -378,14 +523,75 @@ pub async fn handle(
 
     let target_uri = absolute_uri(req.uri(), req.headers())
         .context("failed to resolve absolute URI for proxy request")?;
+    let authority = target_uri.authority().map(|a| a.as_str()).unwrap_or_default();
+    if is_internal_or_private(authority) {
+        let request_id = generate_request_id();
+        let target = target_uri.to_string();
+        append_trace_entry(
+            &state,
+            request_id.clone(),
+            &method,
+            &target,
+            true,
+            "blocked",
+            false,
+        );
+        emit_webhook_event(
+            &state,
+            WebhookEvent::new(
+                "policy_block",
+                request_id,
+                method.as_str(),
+                target,
+                "forwarding to internal or private targets is forbidden",
+            ),
+        );
+        return Ok(block_response(
+            &state.config,
+            StatusCode::FORBIDDEN,
+            "forwarding to internal or private targets is forbidden",
+            None,
+        ));
+    }
+    if host_resolves_to_unsafe_ip(authority).await.unwrap_or(true) {
+        let request_id = generate_request_id();
+        let target = target_uri.to_string();
+        append_trace_entry(
+            &state,
+            request_id.clone(),
+            &method,
+            &target,
+            true,
+            "blocked",
+            false,
+        );
+        emit_webhook_event(
+            &state,
+            WebhookEvent::new(
+                "policy_block",
+                request_id,
+                method.as_str(),
+                target,
+                "forwarding to internal or private targets is forbidden (DNS SSRF)",
+            ),
+        );
+        return Ok(block_response(
+            &state.config,
+            StatusCode::FORBIDDEN,
+            "forwarding to internal or private targets is forbidden",
+            None,
+        ));
+    }
     let target = target_uri.to_string();
     let target_host = target_uri.host().unwrap_or_default().to_string();
     let blocked = should_block(&target, &state.config.policy);
     let enforce_mode = state.config.enforce_mode;
+    let request_id = generate_request_id();
     let request_span = info_span!(
         "aegis.proxy.request",
         method = %method,
         target_host = %target_host,
+        aegis.request_id = %request_id,
         blocked = blocked,
         enforce_mode = enforce_mode.as_str()
     );
@@ -399,25 +605,34 @@ pub async fn handle(
         "allowed"
     };
 
-    let trace_entry = ProxyTraceLogEntry {
-        timestamp_ns: Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-        method: method.as_str().to_string(),
-        target: target.clone(),
+    let has_identity = identity
+        .session_id
+        .as_ref()
+        .or(identity.user_id.as_ref())
+        .or(identity.iam_role.as_ref())
+        .is_some();
+    append_trace_entry(
+        &state,
+        request_id.clone(),
+        &method,
+        &target,
         blocked,
-        enforce_mode: enforce_mode.as_str().to_string(),
-        enforcement: enforcement.to_string(),
-        identity: identity.clone(),
-    };
-    let logger = state.logger.clone();
-    let entry = trace_entry.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Err(err) = logger.append(&entry) {
-            warn!("failed writing proxy trace log: {err}");
-        }
-    });
+        enforcement,
+        has_identity,
+    );
 
     if blocked && enforce_mode == EnforceMode::Strict {
         warn!("strict mode blocked request target={target}");
+        emit_webhook_event(
+            &state,
+            WebhookEvent::new(
+                "policy_block",
+                request_id,
+                method.as_str(),
+                target.clone(),
+                "blocked by policy in strict mode",
+            ),
+        );
         return Ok(block_response(
             &state.config,
             StatusCode::BAD_GATEWAY,
@@ -427,6 +642,16 @@ pub async fn handle(
     }
     if blocked {
         warn!("audit_only policy violation target={target}");
+        emit_webhook_event(
+            &state,
+            WebhookEvent::new(
+                "policy_block",
+                request_id.clone(),
+                method.as_str(),
+                target.clone(),
+                "audit_only policy violation",
+            ),
+        );
     }
 
     let forward_headers = req.headers().clone();
@@ -450,6 +675,16 @@ pub async fn handle(
         Ok(res) => res,
         Err(err) => {
             if err.is_timeout() {
+                emit_webhook_event(
+                    &state,
+                    WebhookEvent::new(
+                        "upstream_timeout",
+                        request_id.clone(),
+                        method.as_str(),
+                        target.clone(),
+                        "upstream timeout",
+                    ),
+                );
                 return Ok(block_response(
                     &state.config,
                     StatusCode::GATEWAY_TIMEOUT,
@@ -480,6 +715,16 @@ pub async fn handle(
         Ok(b) => b,
         Err(err) => {
             if err.is_timeout() {
+                emit_webhook_event(
+                    &state,
+                    WebhookEvent::new(
+                        "upstream_timeout",
+                        request_id.clone(),
+                        method.as_str(),
+                        target.clone(),
+                        "upstream timeout",
+                    ),
+                );
                 return Ok(block_response(
                     &state.config,
                     StatusCode::GATEWAY_TIMEOUT,
@@ -508,9 +753,26 @@ async fn handle_policy_reload(state: ProxyState) -> Result<Response<ProxyBody>> 
     let policy_path = std::env::var("POLICY_PATH").unwrap_or_else(|_| "policy.json".to_string());
     let rego_path = std::env::var("POLICY_REGO_PATH").unwrap_or_else(|_| "policies/payload.rego".to_string());
 
-    let new_config: PolicyConfig = match std::fs::read_to_string(&policy_path) {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-        Err(_) => PolicyConfig::default(),
+    let raw = match std::fs::read_to_string(&policy_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("failed to read policy file {}: {}", policy_path, e);
+            return Ok(response_with(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"failed to read policy"}"#,
+            ));
+        }
+    };
+
+    let new_config: PolicyConfig = match serde_json::from_str(&raw) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("invalid policy JSON: {}", e);
+            return Ok(response_with(
+                StatusCode::BAD_REQUEST,
+                r#"{"error":"invalid policy JSON"}"#,
+            ));
+        }
     };
 
     let new_engine = crate::payload_policy::PayloadPolicyEngine::load_from_path(&rego_path)
@@ -518,7 +780,16 @@ async fn handle_policy_reload(state: ProxyState) -> Result<Response<ProxyBody>> 
         .ok();
 
     {
-        let mut live = state.live_policy.write().unwrap_or_else(|e| e.into_inner());
+        let mut live = match state.live_policy.write() {
+            Ok(guard) => guard,
+            Err(e) => {
+                error!("RwLock poisoned for live_policy during reload: {}", e);
+                return Ok(response_with(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    r#"{"error":"policy reload failed"}"#,
+                ));
+            }
+        };
         live.config = new_config;
         live.payload_engine = new_engine;
     }
@@ -558,6 +829,57 @@ async fn handle_connect(
         .map(|a| a.to_string())
         .context("CONNECT missing authority host:port")?;
     if is_internal_or_private(&authority) {
+        let request_id = generate_request_id();
+        let target = format!("https://{authority}");
+        append_trace_entry(
+            &state,
+            request_id.clone(),
+            &Method::CONNECT,
+            &target,
+            true,
+            "blocked",
+            false,
+        );
+        emit_webhook_event(
+            &state,
+            WebhookEvent::new(
+                "policy_block",
+                request_id,
+                "CONNECT",
+                target,
+                "CONNECT to internal targets forbidden",
+            ),
+        );
+        return Ok(block_response(
+            &state.config,
+            StatusCode::FORBIDDEN,
+            "CONNECT to internal targets forbidden",
+            None,
+        ));
+    }
+    let host = authority.split(':').next().unwrap_or(&authority);
+    if host_resolves_to_unsafe_ip(host).await.unwrap_or(true) {
+        let request_id = generate_request_id();
+        let target = format!("https://{authority}");
+        append_trace_entry(
+            &state,
+            request_id.clone(),
+            &Method::CONNECT,
+            &target,
+            true,
+            "blocked",
+            false,
+        );
+        emit_webhook_event(
+            &state,
+            WebhookEvent::new(
+                "policy_block",
+                request_id,
+                "CONNECT",
+                target,
+                "CONNECT to internal targets forbidden (DNS SSRF)",
+            ),
+        );
         return Ok(block_response(
             &state.config,
             StatusCode::FORBIDDEN,
@@ -637,6 +959,14 @@ async fn handle_mitm_request(
     req: Request<Incoming>,
 ) -> Result<Response<ProxyBody>, Box<dyn std::error::Error + Send + Sync>> {
     let method = req.method().clone();
+    let request_id = generate_request_id();
+    let request_span = info_span!(
+        "aegis.proxy.mitm_request",
+        aegis.request_id = %request_id,
+        method = %method,
+        authority = %authority
+    );
+    let _request_guard = request_span.enter();
     let (parts, body) = req.into_parts();
     let path_q = parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
     let host = authority.split(':').next().unwrap_or(&authority).to_string();
@@ -648,6 +978,16 @@ async fn handle_mitm_request(
         Ok(c) => c,
         Err(e) => {
             if e.downcast_ref::<LengthLimitError>().is_some() {
+                let target_url = format!("https://{authority}{path_q}");
+                append_trace_entry(
+                    &state,
+                    request_id.clone(),
+                    &method,
+                    &target_url,
+                    true,
+                    "blocked",
+                    false,
+                );
                 return Ok(block_response(
                     &state.config,
                     StatusCode::PAYLOAD_TOO_LARGE,
@@ -667,18 +1007,49 @@ async fn handle_mitm_request(
     };
 
     let identity = get_identity(&parts.headers);
+    let has_identity = identity
+        .session_id
+        .as_ref()
+        .or(identity.user_id.as_ref())
+        .or(identity.iam_role.as_ref())
+        .is_some();
     let headers_map = headers_to_map(&parts.headers);
 
     if let Some(ref registry) = state.schema_registry {
         if let Some(ref body_val) = body_json {
             if let Err(validation_errors) = registry.validate(&host, method.as_str(), path_q, body_val) {
                 let reason = validation_errors.join("; ");
+                let truncated = if reason.len() > 500 {
+                    format!("{}...", &reason[..497])
+                } else {
+                    reason.to_string()
+                };
                 let msg = format!(
                     "Aegis Schema Validation Failed: {}. Do not retry with same payload.",
-                    reason
+                    truncated
                 );
-                telemetry::increment_blocked(&host, "schema_validation");
-                return Ok(block_response(&state.config, StatusCode::BAD_REQUEST, &reason, Some(&msg)));
+                telemetry::increment_blocked(&host, telemetry::ViolationType::SchemaValidation);
+                let target_url = format!("https://{authority}{path_q}");
+                append_trace_entry(
+                    &state,
+                    request_id.clone(),
+                    &method,
+                    &target_url,
+                    true,
+                    "blocked",
+                    has_identity,
+                );
+                emit_webhook_event(
+                    &state,
+                    WebhookEvent::new(
+                        "policy_block",
+                        request_id.clone(),
+                        method.as_str(),
+                        target_url,
+                        truncated.clone(),
+                    ),
+                );
+                return Ok(block_response(&state.config, StatusCode::BAD_REQUEST, &truncated, Some(&msg)));
             }
         }
     }
@@ -696,7 +1067,28 @@ async fn handle_mitm_request(
         match engine.evaluate(&rego_input) {
             Ok(decision) if !decision.allow => {
                 let reason = decision.reason.unwrap_or_else(|| "policy violation".to_string());
-                telemetry::increment_blocked(&host, &reason);
+                let violation_source = decision.violation_type.as_deref().unwrap_or(&reason);
+                telemetry::increment_blocked(&host, classify_violation(violation_source));
+                let target_url = format!("https://{authority}{path_q}");
+                append_trace_entry(
+                    &state,
+                    request_id.clone(),
+                    &method,
+                    &target_url,
+                    true,
+                    "blocked",
+                    has_identity,
+                );
+                emit_webhook_event(
+                    &state,
+                    WebhookEvent::new(
+                        "policy_block",
+                        request_id.clone(),
+                        method.as_str(),
+                        target_url,
+                        reason.clone(),
+                    ),
+                );
                 return Ok(block_response(
                     &state.config,
                     StatusCode::FORBIDDEN,
@@ -722,6 +1114,7 @@ async fn handle_mitm_request(
     let mut headers = parts.headers.clone();
     headers.remove("proxy-connection");
     headers.remove("Proxy-Connection");
+    insert_request_id_header(&mut headers, &request_id);
 
     let trace_hash = {
         let mut hasher = blake3::Hasher::new();
@@ -737,18 +1130,51 @@ async fn handle_mitm_request(
         http::HeaderValue::from_str(&trace_hash).unwrap_or_else(|_| http::HeaderValue::from_static("invalid")),
     );
     if let Some(ref c) = identity.user_id {
-        if let Ok(v) = http::HeaderValue::from_str(c) {
-            let _ = headers.insert("x-aegis-caller", v);
+        if sanitize_header_value(c) {
+            if let Ok(v) = http::HeaderValue::from_str(c) {
+                let _ = headers.insert("x-aegis-caller", v);
+            }
         }
     } else if let Some(ref s) = identity.session_id {
-        if let Ok(v) = http::HeaderValue::from_str(s) {
-            let _ = headers.insert("x-aegis-caller", v);
+        if sanitize_header_value(s) {
+            if let Ok(v) = http::HeaderValue::from_str(s) {
+                let _ = headers.insert("x-aegis-caller", v);
+            }
         }
+    }
+
+    if host_resolves_to_unsafe_ip(&host).await.unwrap_or(true) {
+        let target_url = format!("https://{authority}{path_q}");
+        append_trace_entry(
+            &state,
+            request_id.clone(),
+            &method,
+            &target_url,
+            true,
+            "blocked",
+            has_identity,
+        );
+        emit_webhook_event(
+            &state,
+            WebhookEvent::new(
+                "policy_block",
+                request_id.clone(),
+                method.as_str(),
+                target_url.clone(),
+                "forwarding to internal or private targets is forbidden (DNS SSRF)",
+            ),
+        );
+        return Ok(block_response(
+            &state.config,
+            StatusCode::FORBIDDEN,
+            "forwarding to internal or private targets is forbidden",
+            None,
+        ));
     }
 
     let upstream_res = match state
         .client
-        .request(method, &target_url)
+        .request(method.clone(), &target_url)
         .headers(headers)
         .body(body_bytes)
         .send()
@@ -758,6 +1184,25 @@ async fn handle_mitm_request(
         Err(err) => {
             if err.is_timeout() {
                 telemetry::increment_timeout(&host);
+                append_trace_entry(
+                    &state,
+                    request_id.clone(),
+                    &method,
+                    &target_url,
+                    false,
+                    "upstream_timeout",
+                    has_identity,
+                );
+                emit_webhook_event(
+                    &state,
+                    WebhookEvent::new(
+                        "upstream_timeout",
+                        request_id.clone(),
+                        method.as_str(),
+                        target_url.clone(),
+                        "upstream timeout",
+                    ),
+                );
                 return Ok(block_response(
                     &state.config,
                     StatusCode::GATEWAY_TIMEOUT,
@@ -787,6 +1232,25 @@ async fn handle_mitm_request(
             Ok(c) => c,
             Err(err) => {
                 if err.is_timeout() {
+                    append_trace_entry(
+                        &state,
+                        request_id.clone(),
+                        &method,
+                        &target_url,
+                        false,
+                        "upstream_timeout",
+                    has_identity,
+                    );
+                    emit_webhook_event(
+                        &state,
+                        WebhookEvent::new(
+                            "upstream_timeout",
+                            request_id.clone(),
+                            method.as_str(),
+                            target_url.clone(),
+                            "upstream timeout",
+                        ),
+                    );
                     return Ok(block_response(
                         &state.config,
                         StatusCode::GATEWAY_TIMEOUT,
@@ -810,6 +1274,65 @@ async fn handle_mitm_request(
     }
     let body_bytes = body_buf.freeze();
 
+    if let Some(ref engine) = state.response_policy_engine {
+        let response_input = ResponseRegoInput {
+            method: method.as_str().to_string(),
+            path: path_q.to_string(),
+            host: host.clone(),
+            status: status.as_u16(),
+            body: std::str::from_utf8(&body_bytes).ok().map(|v| v.to_string()),
+            headers: headers_to_map(&headers),
+        };
+        match engine.evaluate(&response_input) {
+            Ok(decision) if !decision.allow => {
+                let reason = decision
+                    .reason
+                    .unwrap_or_else(|| "response policy violation".to_string());
+                let metric_reason = decision
+                    .response_injection
+                    .clone()
+                    .unwrap_or_else(|| reason.clone());
+                telemetry::increment_blocked(&host, classify_violation(&metric_reason));
+                append_trace_entry(
+                    &state,
+                    request_id.clone(),
+                    &method,
+                    &target_url,
+                    true,
+                    "blocked",
+                    has_identity,
+                );
+                emit_webhook_event(
+                    &state,
+                    WebhookEvent::new(
+                        "response_policy_block",
+                        request_id.clone(),
+                        method.as_str(),
+                        target_url.clone(),
+                        reason.clone(),
+                    ),
+                );
+                let deny_status = if decision.response_injection.is_some() {
+                    StatusCode::BAD_GATEWAY
+                } else {
+                    StatusCode::FORBIDDEN
+                };
+                return Ok(block_response(&state.config, deny_status, &reason, None));
+            }
+            Err(e) => {
+                tracing::warn!("response policy evaluation error: {e}");
+                return Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("content-type", "application/json")
+                    .body(Full::new(bytes::Bytes::from(
+                        r#"{"error":"policy evaluation failed"}"#,
+                    )))
+                    .unwrap_or_else(|_| response_500()));
+            }
+            _ => {}
+        }
+    }
+
     let mut resp_builder = Response::builder().status(status);
     for (name, value) in &headers {
         resp_builder = resp_builder.header(name.as_str(), value.clone());
@@ -817,5 +1340,42 @@ async fn handle_mitm_request(
     let resp = resp_builder
         .body(Full::new(body_bytes))
         .unwrap_or_else(|_| response_500());
+    append_trace_entry(
+        &state,
+        request_id,
+        &method,
+        &target_url,
+        false,
+        "allowed",
+        has_identity,
+    );
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{generate_request_id, insert_request_id_header, redact_query_from_target};
+
+    #[test]
+    fn generated_request_id_is_uuid() {
+        let id = generate_request_id();
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+    }
+
+    #[test]
+    fn redacts_query_from_target_url() {
+        let redacted =
+            redact_query_from_target("https://api.example.com/v1/chat?token=secret&debug=true");
+        assert_eq!(redacted, "https://api.example.com/v1/chat");
+    }
+
+    #[test]
+    fn adds_request_id_header() {
+        let mut headers = http::HeaderMap::new();
+        insert_request_id_header(&mut headers, "abc-123");
+        assert_eq!(
+            headers.get("X-Aegis-Request-Id").and_then(|v| v.to_str().ok()),
+            Some("abc-123")
+        );
+    }
 }
