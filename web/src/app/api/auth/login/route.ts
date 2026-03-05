@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { createSession, getSessionCookieConfig } from "@/lib/auth";
+import { createSession, getSessionCookieConfig, resolveRole } from "@/lib/auth";
 import { checkLoginLimit } from "@/lib/rate-limit";
 
 const loginSchema = z.object({
@@ -54,10 +54,11 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const token = await createSession(username);
+  const role = resolveRole(username);
+  const token = await createSession(username, role);
   const { name, options } = getSessionCookieConfig();
 
-  const response = NextResponse.json({ ok: true, username });
+  const response = NextResponse.json({ ok: true, username, role });
   response.cookies.set(name, token, options);
   return response;
 }

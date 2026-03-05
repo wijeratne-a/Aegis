@@ -10,15 +10,27 @@ function getSecret() {
   return new TextEncoder().encode(secret);
 }
 
+export type UserRole = "admin" | "auditor";
+
 export interface JwtPayload {
   sub: string;
   username: string;
+  role: UserRole;
   iat: number;
   exp: number;
 }
 
-export async function createSession(username: string): Promise<string> {
-  const token = await new SignJWT({ username })
+export function resolveRole(username: string): UserRole {
+  const adminList = (process.env.ADMIN_USERS ?? "admin")
+    .split(",")
+    .map((u) => u.trim().toLowerCase())
+    .filter(Boolean);
+  return adminList.includes(username.toLowerCase()) ? "admin" : "auditor";
+}
+
+export async function createSession(username: string, role?: UserRole): Promise<string> {
+  const effectiveRole = role ?? resolveRole(username);
+  const token = await new SignJWT({ username, role: effectiveRole })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(username)
     .setIssuedAt()

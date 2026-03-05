@@ -1,14 +1,14 @@
 //! Request-level Rego policy evaluation for MITM payload parsing.
 //! Evaluates allow/reason against decrypted HTTP request (method, path, host, body, headers, identity).
+//! The Rego policy is compiled once at startup; each evaluation clones the pre-built engine.
 
 use anyhow::{Context, Result};
 use regorus::Value as RegoValue;
 use serde::Serialize;
 use std::{fs, path::Path};
 
-#[derive(Debug, Clone)]
 pub struct PayloadPolicyEngine {
-    source: String,
+    engine: regorus::Engine,
 }
 
 #[derive(Debug, Clone)]
@@ -18,18 +18,21 @@ pub struct PayloadDecision {
 }
 
 impl PayloadPolicyEngine {
-    /// Load payload policy from a file path (e.g. policies/payload.rego).
+    /// Load and pre-compile payload policy from a file path (e.g. policies/payload.rego).
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let source = fs::read_to_string(path)
             .with_context(|| format!("failed to read payload policy from {}", path.display()))?;
-        Ok(Self { source })
+        let mut engine = regorus::Engine::new();
+        engine
+            .add_policy("payload.rego".to_string(), source)
+            .context("failed to compile payload Rego policy")?;
+        Ok(Self { engine })
     }
 
-    /// Evaluate the policy against the given request input (any Serialize shape matching Rego expectations).
+    /// Evaluate the pre-compiled policy against the given request input.
     pub fn evaluate(&self, input: &impl Serialize) -> Result<PayloadDecision> {
-        let mut engine = regorus::Engine::new();
-        engine.add_policy("payload.rego".to_string(), self.source.clone())?;
+        let mut engine = self.engine.clone();
         let input_json = serde_json::to_string(input)?;
         engine.set_input(RegoValue::from_json_str(&input_json)?);
 

@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useRegisterPolicy } from "@/lib/api";
+import { useRegisterPolicy, useSession } from "@/lib/api";
 import { usePolicyStore } from "@/lib/policy-store";
 import { toast } from "sonner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -26,6 +26,8 @@ type PolicyForm = z.infer<typeof policyFormSchema>;
 export default function PolicyBuilderPage() {
   const { policyCommitment, setPolicyCommitment } = usePolicyStore();
   const registerMutation = useRegisterPolicy();
+  const sessionQuery = useSession();
+  const isAuditor = sessionQuery.data?.role === "auditor";
   const anchorUrl = registerMutation.data?.anchor_url;
   const anchoredAt = registerMutation.data?.anchored_at;
 
@@ -93,90 +95,96 @@ export default function PolicyBuilderPage() {
       <Card className="mt-8">
         <CardHeader>
           <CardTitle>Register Policy</CardTitle>
-          <CardDescription>Values will be hashed to produce a BLAKE3 commitment.</CardDescription>
+          <CardDescription>
+            {isAuditor
+              ? "Read-only view. Admin role required to register policies."
+              : "Values will be hashed to produce a BLAKE3 commitment."}
+          </CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
-            <div className="space-y-2">
-              <Label>Domain</Label>
-              <div className="flex gap-4">
-                {(["defi", "enterprise"] as const).map((d) => (
-                  <label key={d} className="flex items-center gap-2">
-                    <input
-                      type="radio"
-                      value={d}
-                      {...register("domain")}
-                      className="rounded border-input"
-                    />
-                    <span className="capitalize">{d}</span>
-                  </label>
-                ))}
+          <fieldset disabled={isAuditor} className={isAuditor ? "opacity-60" : ""}>
+            <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
+              <div className="space-y-2">
+                <Label>Domain</Label>
+                <div className="flex gap-4">
+                  {(["defi", "enterprise"] as const).map((d) => (
+                    <label key={d} className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        value={d}
+                        {...register("domain")}
+                        className="rounded border-input"
+                      />
+                      <span className="capitalize">{d}</span>
+                    </label>
+                  ))}
+                </div>
               </div>
-            </div>
 
-            <Tabs defaultValue="json" className="space-y-3">
-              <TabsList>
-                <TabsTrigger value="json">JSON Constraints</TabsTrigger>
-                <TabsTrigger value="rego">Rego Policy</TabsTrigger>
-              </TabsList>
-              <TabsContent value="json" className="space-y-6">
-                <div className="space-y-2">
-                  <Label htmlFor="max_spend">Max Spend (DeFi only)</Label>
-                  <Input
-                    id="max_spend"
-                    type="number"
-                    step="0.01"
-                    placeholder="1000"
-                    {...register("max_spend")}
-                  />
-                  {errors.max_spend && (
-                    <p className="text-sm text-destructive">{errors.max_spend.message}</p>
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <Label>Restricted Endpoints / Tables</Label>
-                    <Button type="button" variant="ghost" size="sm" onClick={addEndpoint}>
-                      <Plus className="h-4 w-4" />
-                    </Button>
-                  </div>
+              <Tabs defaultValue="json" className="space-y-3">
+                <TabsList>
+                  <TabsTrigger value="json">JSON Constraints</TabsTrigger>
+                  <TabsTrigger value="rego">Rego Policy</TabsTrigger>
+                </TabsList>
+                <TabsContent value="json" className="space-y-6">
                   <div className="space-y-2">
-                    {restrictedEndpoints.map((_, idx) => (
-                      <div key={idx} className="flex gap-2">
-                        <Input
-                          placeholder={watch("domain") === "defi" ? "/admin" : "salary"}
-                          {...register(`restricted_endpoints.${idx}`)}
-                        />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => removeEndpoint(idx)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    ))}
+                    <Label htmlFor="max_spend">Max Spend (DeFi only)</Label>
+                    <Input
+                      id="max_spend"
+                      type="number"
+                      step="0.01"
+                      placeholder="1000"
+                      {...register("max_spend")}
+                    />
+                    {errors.max_spend && (
+                      <p className="text-sm text-destructive">{errors.max_spend.message}</p>
+                    )}
                   </div>
-                </div>
-              </TabsContent>
-              <TabsContent value="rego" className="space-y-2">
-                <Label htmlFor="rego_policy">Rego Policy Source (optional)</Label>
-                <textarea
-                  id="rego_policy"
-                  rows={12}
-                  className="w-full rounded-md border border-input bg-background p-3 font-mono text-sm"
-                  placeholder="package aegis"
-                  {...register("rego_policy")}
-                />
-              </TabsContent>
-            </Tabs>
 
-            <Button type="submit" disabled={registerMutation.isPending}>
-              {registerMutation.isPending ? "Registering..." : "Register Policy"}
-            </Button>
-          </form>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label>Restricted Endpoints / Tables</Label>
+                      <Button type="button" variant="ghost" size="sm" onClick={addEndpoint}>
+                        <Plus className="h-4 w-4" />
+                      </Button>
+                    </div>
+                    <div className="space-y-2">
+                      {restrictedEndpoints.map((_, idx) => (
+                        <div key={idx} className="flex gap-2">
+                          <Input
+                            placeholder={watch("domain") === "defi" ? "/admin" : "salary"}
+                            {...register(`restricted_endpoints.${idx}`)}
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => removeEndpoint(idx)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </TabsContent>
+                <TabsContent value="rego" className="space-y-2">
+                  <Label htmlFor="rego_policy">Rego Policy Source (optional)</Label>
+                  <textarea
+                    id="rego_policy"
+                    rows={12}
+                    className="w-full rounded-md border border-input bg-background p-3 font-mono text-sm"
+                    placeholder="package aegis"
+                    {...register("rego_policy")}
+                  />
+                </TabsContent>
+              </Tabs>
+
+              <Button type="submit" disabled={registerMutation.isPending || isAuditor}>
+                {registerMutation.isPending ? "Registering..." : "Register Policy"}
+              </Button>
+            </form>
+          </fieldset>
         </CardContent>
       </Card>
 

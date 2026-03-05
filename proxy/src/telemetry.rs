@@ -14,31 +14,36 @@ use opentelemetry_sdk::{
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 struct Metrics {
-    policy_violation: Counter<u64>,
-    verification_success: Counter<u64>,
-    identity_bound_verification: Counter<u64>,
+    request: Counter<u64>,
+    blocked: Counter<u64>,
+    timeout: Counter<u64>,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
 
-pub fn increment_policy_violation(domain: &str) {
+pub fn increment_request(host: &str) {
     if let Some(m) = METRICS.get() {
-        m.policy_violation
-            .add(1, &[KeyValue::new("domain", domain.to_string())]);
+        m.request
+            .add(1, &[KeyValue::new("host", host.to_string())]);
     }
 }
 
-pub fn increment_verification_success(domain: &str) {
+pub fn increment_blocked(host: &str, reason: &str) {
     if let Some(m) = METRICS.get() {
-        m.verification_success
-            .add(1, &[KeyValue::new("domain", domain.to_string())]);
+        m.blocked.add(
+            1,
+            &[
+                KeyValue::new("host", host.to_string()),
+                KeyValue::new("reason", reason.to_string()),
+            ],
+        );
     }
 }
 
-pub fn increment_identity_bound(domain: &str) {
+pub fn increment_timeout(host: &str) {
     if let Some(m) = METRICS.get() {
-        m.identity_bound_verification
-            .add(1, &[KeyValue::new("domain", domain.to_string())]);
+        m.timeout
+            .add(1, &[KeyValue::new("host", host.to_string())]);
     }
 }
 
@@ -46,9 +51,9 @@ pub fn init_telemetry() -> Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let json_logs = std::env::var("AEGIS_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
-        .unwrap_or(true);
+        .unwrap_or(false);
     let service_name =
-        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "aegis-verifier".to_string());
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "aegis-proxy".to_string());
 
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
 
@@ -61,13 +66,16 @@ pub fn init_telemetry() -> Result<()> {
             .build()?;
 
         let tracer_provider = TracerProvider::builder()
-            .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(1.0))))
+            .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+                1.0,
+            ))))
             .with_id_generator(RandomIdGenerator::default())
             .with_resource(resource.clone())
             .with_batch_exporter(span_exporter, runtime::Tokio)
             .build();
 
-        let tracer = tracer_provider.tracer_with_scope(InstrumentationScope::builder(service_name).build());
+        let tracer = tracer_provider
+            .tracer_with_scope(InstrumentationScope::builder(service_name).build());
         global::set_tracer_provider(tracer_provider);
 
         let metric_exporter = opentelemetry_otlp::MetricExporter::builder()
@@ -80,13 +88,11 @@ pub fn init_telemetry() -> Result<()> {
             .with_reader(reader)
             .build();
         global::set_meter_provider(meter_provider);
-        let meter = global::meter("aegis-verifier");
+        let meter = global::meter("aegis-proxy");
         let _ = METRICS.set(Metrics {
-            policy_violation: meter.u64_counter("aegis.policy_violation").build(),
-            verification_success: meter.u64_counter("aegis.verification_success").build(),
-            identity_bound_verification: meter
-                .u64_counter("aegis.identity_bound_verification")
-                .build(),
+            request: meter.u64_counter("aegis.proxy.request").build(),
+            blocked: meter.u64_counter("aegis.proxy.blocked").build(),
+            timeout: meter.u64_counter("aegis.proxy.timeout").build(),
         });
 
         let init_result = if json_logs {

@@ -29,9 +29,20 @@ spec:
               value: "json"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.otel.endpoint | quote }}
+            {{- if .Values.proxy.externalCa.secretName }}
+            - name: AEGIS_CA_CERT_PATH
+              value: /etc/aegis/ca/tls.crt
+            - name: AEGIS_CA_KEY_PATH
+              value: /etc/aegis/ca/tls.key
+            {{- end }}
           volumeMounts:
             - name: policy-json
               mountPath: /etc/aegis
+            {{- if .Values.proxy.externalCa.secretName }}
+            - name: external-ca
+              mountPath: /etc/aegis/ca
+              readOnly: true
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /healthz
@@ -49,3 +60,8 @@ spec:
             items:
               - key: policy.json
                 path: policy.json
+        {{- if .Values.proxy.externalCa.secretName }}
+        - name: external-ca
+          secret:
+            secretName: {{ .Values.proxy.externalCa.secretName }}
+        {{- end }}

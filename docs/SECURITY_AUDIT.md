@@ -244,3 +244,43 @@ fn hex_encode(bytes: &[u8]) -> String {
 5. **Scope** GET /api/receipts by tenant/user.
 6. **Move** proxy trace log append to `spawn_blocking` or async file I/O.
 7. **Harden** verifier error responses (no internal details to client).
+
+---
+
+## Key Management Roadmap
+
+### KeyProvider Trait
+
+All signing operations go through the `KeyProvider` trait (`verifier/src/keys.rs`):
+
+```rust
+#[async_trait]
+pub trait KeyProvider: Send + Sync {
+    async fn sign(&self, data: &[u8]) -> Result<Vec<u8>>;
+    fn public_key_bytes(&self) -> Vec<u8>;
+}
+```
+
+The active provider is selected at startup via the `KEY_PROVIDER` env var in `build_key_provider()`.
+
+### Current Implementations
+
+| Provider | `KEY_PROVIDER` value | Description | Env Vars |
+|----------|---------------------|-------------|----------|
+| `LocalKeyProvider` | `local` (default) | Generates a random Ed25519 keypair in-process on each startup. Suitable for development and demos. Keys are ephemeral and not persisted. | None |
+| `EnvKeyProvider` | `env` | Loads a static Ed25519 private key from a hex-encoded env var. Suitable for staging or single-instance deployments where the key can be injected via secret management. | `AEGIS_SIGNING_KEY_HEX` (32-byte hex) |
+
+### Planned Implementations (Stubs)
+
+| Provider | `KEY_PROVIDER` value | Status | Description | Env Vars |
+|----------|---------------------|--------|-------------|----------|
+| `AwsKmsProvider` | `aws_kms` | **Stub** | Will delegate signing to AWS KMS via the `aws-sdk-kms` crate. The private key never leaves the HSM boundary. | `AWS_KMS_KEY_ID` |
+| `VaultProvider` | `vault` | **Stub** | Will delegate signing to HashiCorp Vault Transit secrets engine. The private key is managed by Vault and never exposed to the verifier process. | `VAULT_MOUNT_PATH`, `VAULT_KEY_NAME` |
+
+Both stubs currently bail with an explanatory error message at runtime if selected. They exist to validate the trait interface and env-var plumbing ahead of full integration.
+
+### Production Guidance
+
+- **Production deployments should use unextractable keys** managed by a KMS, Vault Transit engine, or hardware security module (HSM). The `local` and `env` providers expose raw key material in process memory.
+- When `aws_kms` or `vault` providers are fully implemented, the private key will never be present in the verifier's address space; only the public key (for receipt verification) will be available locally.
+- Rotate keys via KMS/Vault key versioning; the `public_key` field in each `PotReceipt` allows verifiers to identify which key version signed a given receipt.

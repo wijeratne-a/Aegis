@@ -42,7 +42,10 @@ pub async fn verify_trace(
     let verify_span = info_span!(
         "aegis.verify",
         policy_commitment = %request.policy_commitment,
-        domain = %request.agent_metadata.domain
+        domain = %request.agent_metadata.domain,
+        aegis.session_id = tracing::field::Empty,
+        aegis.user_id = tracing::field::Empty,
+        aegis.iam_role = tracing::field::Empty,
     );
     let _span_guard = verify_span.enter();
 
@@ -71,6 +74,16 @@ pub async fn verify_trace(
     let timestamp_ns = Utc::now().timestamp_nanos_opt().unwrap_or_default();
     let receipt_id = Uuid::new_v4().to_string();
     let identity_hash = identity_hash(&request.identity_context)?;
+
+    if let Some(ref id_ctx) = request.identity_context {
+        verify_span.record(
+            "aegis.session_id",
+            id_ctx.session_id.as_deref().unwrap_or(""),
+        );
+        verify_span.record("aegis.user_id", id_ctx.user_id.as_deref().unwrap_or(""));
+        verify_span.record("aegis.iam_role", id_ctx.iam_role.as_deref().unwrap_or(""));
+        telemetry::increment_identity_bound(&request.agent_metadata.domain);
+    }
 
     let combined_binding = format!(
         "{}\n{}\n{}",

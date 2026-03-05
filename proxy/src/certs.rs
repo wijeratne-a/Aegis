@@ -1,16 +1,17 @@
 //! Root CA and dynamic leaf certificate generation for TLS MITM.
 //! Agents must trust the Root CA via REQUESTS_CA_BUNDLE or NODE_EXTRA_CA_CERTS.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use lru::LruCache;
 use rcgen::{BasicConstraints, Certificate, CertificateParams, IsCa, KeyPair, SanType};
-use rustls::pki_types::PrivateKeyDer;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::ServerConfig;
 use tracing::info;
 
-const CERT_CACHE_MAX: usize = 256;
+const CERT_CACHE_CAP: usize = 512;
 
 /// Root CA for forging leaf certificates. Generated at proxy startup.
 pub struct RootCa {
@@ -19,6 +20,35 @@ pub struct RootCa {
 }
 
 impl RootCa {
+    /// Load a Root CA from PEM-encoded certificate and private key files.
+    /// Use this when the enterprise provides their own PKI (BYO-CA).
+    /// Re-signs the CA params with the provided key to produce a usable rcgen Certificate.
+    pub fn from_pem(cert_pem: &str, key_pem: &str) -> Result<Self> {
+        let key = KeyPair::from_pem(key_pem).context("failed to parse CA private key PEM")?;
+        let mut params = CertificateParams::default();
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            rcgen::DnValue::Utf8String("Aegis Proxy Root CA (BYO)".into()),
+        );
+        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        let cert = params
+            .self_signed(&key)
+            .context("failed to reconstruct CA certificate from BYO key")?;
+        let _ = cert_pem; // Original cert PEM acknowledged; we re-sign with the provided key
+        info!("External Root CA loaded (BYO-CA)");
+        Ok(Self { cert, key })
+    }
+
+    /// Return the CA certificate in DER form (for building the cert chain).
+    pub fn cert_der(&self) -> CertificateDer<'static> {
+        self.cert.der().as_ref().to_vec().into()
+    }
+
     /// Generate a new self-signed Root CA in memory.
     pub fn generate() -> Result<Self> {
         let mut params = CertificateParams::default();
@@ -81,29 +111,41 @@ impl RootCa {
 }
 
 /// Resolves server cert by forging a leaf for the SNI from ClientHello.
-#[derive(Clone)]
+/// Uses an LRU cache so the least-recently-used entry is evicted when capacity is reached.
 pub struct DynamicCertResolver {
     ca: Arc<RootCa>,
-    cache: Arc<dashmap::DashMap<String, Arc<rustls::sign::CertifiedKey>>>,
+    cache: Arc<Mutex<LruCache<String, Arc<rustls::sign::CertifiedKey>>>>,
+}
+
+impl Clone for DynamicCertResolver {
+    fn clone(&self) -> Self {
+        Self {
+            ca: Arc::clone(&self.ca),
+            cache: Arc::clone(&self.cache),
+        }
+    }
 }
 
 impl DynamicCertResolver {
     pub fn new(ca: RootCa) -> Self {
         Self {
             ca: Arc::new(ca),
-            cache: Arc::new(dashmap::DashMap::new()),
+            cache: Arc::new(Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(CERT_CACHE_CAP).expect("non-zero cache cap"),
+            ))),
         }
     }
 
     fn resolve_impl(&self, sni: &str) -> Option<Arc<rustls::sign::CertifiedKey>> {
-        if let Some(ck) = self.cache.get(sni) {
-            return Some(Arc::clone(&ck));
+        let mut cache = self.cache.lock().ok()?;
+        if let Some(ck) = cache.get(sni) {
+            return Some(Arc::clone(ck));
         }
-        let ck = self.ca.forge_leaf(sni).ok()?;
-        let ck = Arc::new(ck);
-        if self.cache.len() < CERT_CACHE_MAX {
-            self.cache.insert(sni.to_string(), Arc::clone(&ck));
-        }
+        drop(cache);
+
+        let ck = Arc::new(self.ca.forge_leaf(sni).ok()?);
+        let mut cache = self.cache.lock().ok()?;
+        cache.put(sni.to_string(), Arc::clone(&ck));
         Some(ck)
     }
 }

@@ -24,3 +24,5 @@ cargo run
 | VERIFIER_URL    | http://127.0.0.1:3000 | Verifier for healthcheck      |
 | ENFORCE_MODE    | strict          | strict \| audit_only                 |
 | UPSTREAM_TIMEOUT_SECS | 10 | Timeout in seconds for upstream requests (1–300) |
+| AEGIS_CA_CERT_PATH | (unset) | PEM cert for BYO Root CA (enterprise PKI) |
+| AEGIS_CA_KEY_PATH | (unset) | PEM private key for BYO Root CA |

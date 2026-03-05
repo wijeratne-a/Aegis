@@ -78,8 +78,10 @@ impl PolicyEngine for LegacyJsonEngine {
     }
 }
 
+/// Rego-based policy engine. The Rego AST is compiled once at load time;
+/// each evaluation clones the pre-built engine to avoid re-parsing.
 pub struct RegoEngine {
-    source: String,
+    engine: RegoEngineImpl,
 }
 
 impl RegoEngine {
@@ -92,7 +94,9 @@ impl RegoEngine {
                 source.push('\n');
             }
         }
-        Ok(Self { source })
+        let mut engine = RegoEngineImpl::new();
+        engine.add_policy("aegis.rego".to_string(), source)?;
+        Ok(Self { engine })
     }
 }
 
@@ -126,8 +130,7 @@ impl PolicyEngine for RegoEngine {
                 }
             }
         }
-        let mut engine = RegoEngineImpl::new();
-        engine.add_policy("aegis.rego".to_string(), self.source.clone())?;
+        let mut engine = self.engine.clone();
         let input = serde_json::to_string(request)?;
         engine.set_input(RegoValue::from_json_str(&input)?);
 

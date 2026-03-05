@@ -3,6 +3,10 @@ proxy:
   replicas: 2
   enforceMode: audit_only
   port: 8080
+  # BYO Root CA: provide a K8s TLS secret with tls.crt and tls.key.
+  # When set, the proxy loads this CA instead of generating an ephemeral one.
+  externalCa:
+    secretName: ""
   resources:
     requests:
       cpu: 100m
@@ -48,3 +52,7 @@ policy:
 
 identity:
   required: false
+
+redis:
+  enabled: false
+  url: ""

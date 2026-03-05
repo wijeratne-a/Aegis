@@ -1,4 +1,4 @@
-use std::{net::{IpAddr, SocketAddr}, str::FromStr, sync::Arc};
+use std::{net::{IpAddr, SocketAddr}, str::FromStr, sync::{Arc, RwLock}};
 
 use rustls::ServerConfig;
 
@@ -19,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, info_span, warn};
 
+use crate::telemetry;
 use crate::trace_log::TraceLogger;
 
 /// HTTP/1.x method prefixes. If the decrypted stream doesn't start with one of these, it's not HTTP.
@@ -152,7 +153,7 @@ pub struct ProxyConfig {
     pub semantic_deny: bool,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyConfig {
     #[serde(default)]
     pub restricted_endpoints: Vec<String>,
@@ -204,6 +205,13 @@ pub struct ProxyState {
     pub schema_registry: Option<Arc<crate::schema_validator::SchemaRegistry>>,
     /// Root CA PEM for GET /ca (loopback only). Used for agent trust setup.
     pub ca_pem: Option<String>,
+    /// Mutable policy state for hot-reload. Holds (PolicyConfig, Option<PayloadPolicyEngine>).
+    pub live_policy: Arc<RwLock<LivePolicy>>,
+}
+
+pub struct LivePolicy {
+    pub config: PolicyConfig,
+    pub payload_engine: Option<Arc<crate::payload_policy::PayloadPolicyEngine>>,
 }
 
 pub type ProxyBody = Full<bytes::Bytes>;
@@ -341,6 +349,22 @@ pub async fn handle(
                 )))
                 .unwrap_or_else(|_| response_500()));
         }
+        if path == "/policy/current" && remote_addr.ip().is_loopback() {
+            let policy_hash = {
+                let live = state.live_policy.read().unwrap_or_else(|e| e.into_inner());
+                let raw = serde_json::to_vec(&live.config).unwrap_or_default();
+                format!("0x{}", blake3::hash(&raw).to_hex())
+            };
+            let body = serde_json::json!({
+                "policy_hash": policy_hash,
+                "has_rego_engine": state.live_policy.read().unwrap_or_else(|e| e.into_inner()).payload_engine.is_some(),
+            });
+            return Ok(response_with(StatusCode::OK, &body.to_string()));
+        }
+    }
+
+    if method == Method::POST && req.uri().path() == "/policy/reload" && remote_addr.ip().is_loopback() {
+        return handle_policy_reload(state).await;
     }
 
     if method == Method::CONNECT {
@@ -480,6 +504,32 @@ pub async fn handle(
     Ok(resp)
 }
 
+async fn handle_policy_reload(state: ProxyState) -> Result<Response<ProxyBody>> {
+    let policy_path = std::env::var("POLICY_PATH").unwrap_or_else(|_| "policy.json".to_string());
+    let rego_path = std::env::var("POLICY_REGO_PATH").unwrap_or_else(|_| "policies/payload.rego".to_string());
+
+    let new_config: PolicyConfig = match std::fs::read_to_string(&policy_path) {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        Err(_) => PolicyConfig::default(),
+    };
+
+    let new_engine = crate::payload_policy::PayloadPolicyEngine::load_from_path(&rego_path)
+        .map(Arc::new)
+        .ok();
+
+    {
+        let mut live = state.live_policy.write().unwrap_or_else(|e| e.into_inner());
+        live.config = new_config;
+        live.payload_engine = new_engine;
+    }
+
+    info!("policy reloaded from disk");
+    Ok(response_with(
+        StatusCode::OK,
+        r#"{"status":"reloaded"}"#,
+    ))
+}
+
 fn absolute_uri(uri: &Uri, headers: &http::HeaderMap<HeaderValue>) -> Result<Uri> {
     if uri.scheme().is_some() && uri.authority().is_some() {
         return Ok(uri.clone());
@@ -591,6 +641,8 @@ async fn handle_mitm_request(
     let path_q = parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
     let host = authority.split(':').next().unwrap_or(&authority).to_string();
 
+    telemetry::increment_request(&host);
+
     let limited_body = Limited::new(body, MAX_BODY_BYTES);
     let collected = match limited_body.collect().await {
         Ok(c) => c,
@@ -625,6 +677,7 @@ async fn handle_mitm_request(
                     "Aegis Schema Validation Failed: {}. Do not retry with same payload.",
                     reason
                 );
+                telemetry::increment_blocked(&host, "schema_validation");
                 return Ok(block_response(&state.config, StatusCode::BAD_REQUEST, &reason, Some(&msg)));
             }
         }
@@ -643,6 +696,7 @@ async fn handle_mitm_request(
         match engine.evaluate(&rego_input) {
             Ok(decision) if !decision.allow => {
                 let reason = decision.reason.unwrap_or_else(|| "policy violation".to_string());
+                telemetry::increment_blocked(&host, &reason);
                 return Ok(block_response(
                     &state.config,
                     StatusCode::FORBIDDEN,
@@ -703,6 +757,7 @@ async fn handle_mitm_request(
         Ok(r) => r,
         Err(err) => {
             if err.is_timeout() {
+                telemetry::increment_timeout(&host);
                 return Ok(block_response(
                     &state.config,
                     StatusCode::GATEWAY_TIMEOUT,

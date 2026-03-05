@@ -9,6 +9,7 @@ services:
       POLICY_DIR: /etc/aegis/policies
       AEGIS_CLOUD_URL: http://host.docker.internal:3001/api/receipts
       AEGIS_LOG_FORMAT: json
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     volumes:
       - ./policies:/etc/aegis/policies:ro
     ports:
@@ -26,11 +27,51 @@ services:
       VERIFIER_URL: http://aegis-verifier:3000
       TRACE_WAL_PATH: /var/lib/aegis/proxy-trace.jsonl
       AEGIS_LOG_FORMAT: json
+      REDIS_URL: redis://redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     volumes:
       - ./policy.json:/etc/aegis/policy.json:ro
       - proxy-data:/var/lib/aegis
     ports:
       - "8080:8080"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    ports:
+      - "4317:4317"
+      - "8889:8889"
+    volumes:
+      - ./deploy/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
+    depends_on:
+      - prometheus
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yaml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=aegis
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
 
 volumes:
   proxy-data:

@@ -5,6 +5,7 @@ import {
 } from "@tanstack/react-query";
 import type { RegisterPolicyInput } from "./schemas";
 import type { PotReceipt, RegisterResponse } from "./types";
+import type { UserRole } from "./auth";
 
 async function registerPolicy(payload: RegisterPolicyInput): Promise<RegisterResponse> {
   const res = await fetch("/api/register", {
@@ -47,5 +48,22 @@ export function useReceipts() {
       return data.receipts ?? [];
     },
     refetchInterval: 5000,
+  });
+}
+
+type SessionResponse = {
+  user: { username: string; role: UserRole } | null;
+};
+
+export function useSession() {
+  return useQuery({
+    queryKey: ["session"],
+    queryFn: async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      if (!res.ok) return null;
+      const data = (await res.json()) as SessionResponse;
+      return data.user;
+    },
+    staleTime: 60_000,
   });
 }

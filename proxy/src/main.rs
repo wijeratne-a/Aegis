@@ -10,30 +10,17 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tracing::{error, info};
-use tracing_subscriber::{fmt, EnvFilter};
 
 mod certs;
 mod intercept;
 mod payload_policy;
 mod schema_validator;
+pub mod telemetry;
 mod trace_log;
 
 use certs::{build_mitm_server_config, RootCa};
-use intercept::{EnforceMode, PolicyConfig, ProxyConfig, ProxyState};
+use intercept::{EnforceMode, LivePolicy, PolicyConfig, ProxyConfig, ProxyState};
 use trace_log::TraceLogger;
-
-fn init_logging() {
-    let json_logs = std::env::var("AEGIS_LOG_FORMAT")
-        .map(|v| v.eq_ignore_ascii_case("json"))
-        .unwrap_or(false);
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let builder = fmt().with_env_filter(filter);
-    if json_logs {
-        builder.json().init();
-    } else {
-        builder.init();
-    }
-}
 
 fn read_policy(path: &str) -> Result<PolicyConfig> {
     let raw = fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
@@ -42,7 +29,7 @@ fn read_policy(path: &str) -> Result<PolicyConfig> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_logging();
+    telemetry::init_telemetry()?;
 
     let policy_path = std::env::var("POLICY_PATH").unwrap_or_else(|_| "policy.json".to_string());
     let enforce_mode = std::env::var("ENFORCE_MODE")
@@ -73,7 +60,19 @@ async fn main() -> Result<()> {
         PolicyConfig::default()
     });
 
-    let root_ca = RootCa::generate()?;
+    let root_ca = match (
+        std::env::var("AEGIS_CA_CERT_PATH"),
+        std::env::var("AEGIS_CA_KEY_PATH"),
+    ) {
+        (Ok(cert_path), Ok(key_path)) => {
+            let cert_pem = fs::read_to_string(&cert_path)
+                .with_context(|| format!("failed to read CA cert from {cert_path}"))?;
+            let key_pem = fs::read_to_string(&key_path)
+                .with_context(|| format!("failed to read CA key from {key_path}"))?;
+            RootCa::from_pem(&cert_pem, &key_pem)?
+        }
+        _ => RootCa::generate()?,
+    };
     let ca_pem = root_ca.export_pem();
     if let Ok(ca_path) = std::env::var("AEGIS_CA_PATH") {
         if let Some(parent) = std::path::Path::new(&ca_path).parent() {
@@ -103,6 +102,11 @@ async fn main() -> Result<()> {
         info!("Schema registry loaded for request body validation");
     }
 
+    let live_policy = Arc::new(std::sync::RwLock::new(LivePolicy {
+        config: policy.clone(),
+        payload_engine: payload_engine.clone(),
+    }));
+
     let state = ProxyState {
         config: Arc::new(ProxyConfig {
             enforce_mode,
@@ -119,6 +123,7 @@ async fn main() -> Result<()> {
         payload_engine,
         schema_registry,
         ca_pem: Some(ca_pem),
+        live_policy,
     };
 
     let addr: SocketAddr = bind

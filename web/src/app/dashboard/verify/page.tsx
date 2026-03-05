@@ -1,23 +1,39 @@
 "use client";
 
+import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useReceipts } from "@/lib/api";
+import { useReceipts, useSession } from "@/lib/api";
 import type { PotReceipt } from "@/lib/types";
+
+const SSN_RE = /\b(\d{3})-(\d{2})-(\d{4})\b/g;
+const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g;
+
+function maskSensitiveData(value: string): string {
+  return value
+    .replace(SSN_RE, (_match, _g1, _g2, last4) => `***-**-${last4}`)
+    .replace(EMAIL_RE, (_match, domain) => `***@${domain}`);
+}
 
 function formatTimestamp(ns: number) {
   const ms = ns / 1e6;
   return new Date(ms).toISOString();
 }
 
-function PotReceiptCard({ proof }: { proof: PotReceipt }) {
+function MaskedText({ text, masked }: { text: string; masked: boolean }) {
+  const display = masked ? maskSensitiveData(text) : text;
+  return <pre className="mt-1 break-all rounded bg-muted/50 p-2">{display}</pre>;
+}
+
+function PotReceiptCard({ proof, masked }: { proof: PotReceipt; masked: boolean }) {
   return (
     <Card className="border-border/50">
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Badge variant="secondary">Receipt</Badge>
-          {proof.receipt_id}
+          <MaskedText text={proof.receipt_id} masked={masked} />
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 font-mono text-sm">
@@ -60,12 +76,30 @@ function PotReceiptCard({ proof }: { proof: PotReceipt }) {
 
 export default function ReceiptViewerPage() {
   const receiptsQuery = useReceipts();
+  const sessionQuery = useSession();
+  const isAdmin = sessionQuery.data?.role === "admin";
+  const [showRaw, setShowRaw] = useState(false);
+  const masked = !showRaw;
+
   return (
     <div>
-      <h1 className="text-2xl font-bold">Receipts</h1>
-      <p className="mt-2 text-muted-foreground">
-        Control plane view of proof receipts reported by local sidecars. Raw traces never enter the dashboard.
-      </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Receipts</h1>
+          <p className="mt-2 text-muted-foreground">
+            Control plane view of proof receipts reported by local sidecars. Raw traces never enter the dashboard.
+          </p>
+        </div>
+        {isAdmin && (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setShowRaw((prev) => !prev)}
+          >
+            {showRaw ? "Mask PII" : "Show raw"}
+          </Button>
+        )}
+      </div>
 
       {receiptsQuery.isLoading && (
         <Card className="mt-8">
@@ -101,8 +135,10 @@ export default function ReceiptViewerPage() {
           ) : (
             receiptsQuery.data.map((entry) => (
               <div key={entry.value.receipt_id} className="space-y-2">
-                <p className="text-xs text-muted-foreground">received_at: {entry.received_at}</p>
-                <PotReceiptCard proof={entry.value} />
+                <p className="text-xs text-muted-foreground">
+                  received_at: {masked ? maskSensitiveData(entry.received_at) : entry.received_at}
+                </p>
+                <PotReceiptCard proof={entry.value} masked={masked} />
               </div>
             ))
           )}

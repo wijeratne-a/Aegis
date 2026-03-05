@@ -1,8 +1,29 @@
 /**
  * In-memory sliding-window rate limiter.
- * In production, use Redis or Upstash for distributed rate limiting across
- * instances. When behind a trusted proxy, configure trust proxy and use a
- * single forwarded header only (e.g. X-Forwarded-For) to mitigate spoofing.
+ *
+ * PRODUCTION NOTE -- Distributed Rate Limiting with Redis
+ * -------------------------------------------------------
+ * This in-memory implementation works for single-instance deployments. For
+ * production clusters with multiple replicas, replace with a Redis-backed
+ * sliding window using MULTI/EXEC + ZRANGEBYSCORE (sorted-set pattern) or
+ * the token-bucket Lua script approach.
+ *
+ * When REDIS_URL is set in the environment, install `ioredis` and swap the
+ * Map-based store below for Redis sorted sets keyed by identifier. Example:
+ *
+ *   import Redis from "ioredis";
+ *   const redis = new Redis(process.env.REDIS_URL);
+ *   // ZADD <key> <now> <now>   -- add timestamp
+ *   // ZREMRANGEBYSCORE <key> 0 <now - windowMs>  -- trim old
+ *   // ZCARD <key>              -- count in window
+ *   // EXPIRE <key> <windowSec> -- auto-cleanup
+ *
+ * The docker-compose stack and Helm chart include a Redis service gated
+ * behind `redis.enabled`. Set REDIS_URL=redis://aegis-redis:6379 in the
+ * deployment environment to activate it.
+ *
+ * When behind a trusted proxy, configure trust proxy and use a single
+ * forwarded header only (e.g. X-Forwarded-For) to mitigate spoofing.
  */
 
 const windowMs = 60 * 1000; // 1 minute
