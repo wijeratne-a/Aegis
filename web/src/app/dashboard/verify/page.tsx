@@ -35,6 +35,12 @@ function PotReceiptCard({ proof }: { proof: PotReceipt }) {
             <pre className="mt-1 break-all rounded bg-muted/50 p-2">{proof.identity_hash}</pre>
           </div>
         )}
+        {proof.combined_hash && (
+          <div>
+            <span className="text-muted-foreground">combined_hash:</span>
+            <pre className="mt-1 break-all rounded bg-muted/50 p-2">{proof.combined_hash}</pre>
+          </div>
+        )}
         <div>
           <span className="text-muted-foreground">timestamp_ns:</span>
           <pre className="mt-1 rounded bg-muted/50 p-2">{formatTimestamp(proof.timestamp_ns)}</pre>

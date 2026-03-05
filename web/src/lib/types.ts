@@ -35,6 +35,7 @@ export interface PotReceipt {
   policy_commitment: string;
   trace_hash: string;
   identity_hash?: string;
+  combined_hash?: string;
   timestamp_ns: number;
   signature: string;
   public_key: string;

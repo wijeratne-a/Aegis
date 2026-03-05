@@ -9,6 +9,7 @@ blake3 = "1"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
+jsonschema = "0.18"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["full"] }

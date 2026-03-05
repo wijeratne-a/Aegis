@@ -35,5 +35,18 @@ reason = "GraphQL delete mutation not allowed for ReadOnly role" {
   input.identity.iam_role == "ReadOnly"
 }
 
-# A2A: require x-aegis-trace for agent-to-agent calls (simplified - allow if present).
-# Week 1: permissive; full chaining deferred.
+# A2A: when x-aegis-caller is present (agent-to-agent), require x-aegis-trace for audit chain.
+allow = false {
+  caller := input.headers["x-aegis-caller"]
+  caller != null
+  caller != ""
+  trace := input.headers["x-aegis-trace"]
+  trace == null
+}
+reason = "A2A call requires x-aegis-trace header" {
+  caller := input.headers["x-aegis-caller"]
+  caller != null
+  caller != ""
+  trace := input.headers["x-aegis-trace"]
+  trace == null
+}

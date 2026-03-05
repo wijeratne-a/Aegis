@@ -43,6 +43,7 @@ export const potReceiptSchema = z.object({
   policy_commitment: z.string(),
   trace_hash: z.string(),
   identity_hash: z.string().optional(),
+  combined_hash: z.string().optional(),
   timestamp_ns: z.number(),
   signature: z.string(),
   public_key: z.string(),

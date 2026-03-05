@@ -14,10 +14,89 @@ use hyper_util::rt::TokioIo;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::io::Cursor;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, info_span, warn};
 
 use crate::trace_log::TraceLogger;
+
+/// HTTP/1.x method prefixes. If the decrypted stream doesn't start with one of these, it's not HTTP.
+const HTTP_METHOD_PREFIXES: &[&[u8]] = &[
+    b"GET ", b"HEAD ", b"POST ", b"PUT ", b"DELETE ", b"CONNECT ", b"OPTIONS ", b"TRACE ", b"PATCH ",
+];
+
+fn looks_like_http(buf: &[u8]) -> bool {
+    if buf.len() < 3 {
+        return false;
+    }
+    HTTP_METHOD_PREFIXES
+        .iter()
+        .any(|prefix| buf.len() >= prefix.len() && buf.starts_with(prefix))
+}
+
+/// Wraps a stream to prepend bytes for read while forwarding writes. Used after HTTP protocol peek.
+struct PrependReader<R> {
+    prepended: Option<Cursor<Vec<u8>>>,
+    inner: R,
+}
+
+impl<R> PrependReader<R> {
+    fn new(prepended: Vec<u8>, inner: R) -> Self {
+        Self {
+            prepended: Some(Cursor::new(prepended)),
+            inner,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for PrependReader<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Some(ref mut cursor) = self.prepended {
+            let unfilled = buf.initialize_unfilled();
+            match std::io::Read::read(cursor, unfilled) {
+                Ok(0) => {
+                    self.prepended = None;
+                    return AsyncRead::poll_read(std::pin::Pin::new(&mut self.inner), cx, buf);
+                }
+                Ok(n) => {
+                    buf.advance(n);
+                    return std::task::Poll::Ready(Ok(()));
+                }
+                Err(e) => return std::task::Poll::Ready(Err(e)),
+            }
+        }
+        AsyncRead::poll_read(std::pin::Pin::new(&mut self.inner), cx, buf)
+    }
+}
+
+impl<R: AsyncWrite + Unpin> AsyncWrite for PrependReader<R> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        AsyncWrite::poll_write(std::pin::Pin::new(&mut self.inner), cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        AsyncWrite::poll_flush(std::pin::Pin::new(&mut self.inner), cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        AsyncWrite::poll_shutdown(std::pin::Pin::new(&mut self.inner), cx)
+    }
+}
 
 fn is_internal_or_private(authority: &str) -> bool {
     let host = authority.split(':').next().unwrap_or(authority).trim();
@@ -69,6 +148,8 @@ pub struct ProxyConfig {
     pub enforce_mode: EnforceMode,
     pub verifier_url: String,
     pub policy: PolicyConfig,
+    /// When true, return 200 with semantic error body instead of 403/4xx. Prevents LLM retry loops.
+    pub semantic_deny: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -120,6 +201,7 @@ pub struct ProxyState {
     pub client: reqwest::Client,
     pub mitm_server_config: Arc<ServerConfig>,
     pub payload_engine: Option<Arc<crate::payload_policy::PayloadPolicyEngine>>,
+    pub schema_registry: Option<Arc<crate::schema_validator::SchemaRegistry>>,
     /// Root CA PEM for GET /ca (loopback only). Used for agent trust setup.
     pub ca_pem: Option<String>,
 }
@@ -140,6 +222,48 @@ fn response_500() -> Response<ProxyBody> {
         .header("content-type", "application/json")
         .body(Full::new(bytes::Bytes::from(r#"{"error":"internal error"}"#)))
         .expect("fallback 500 response must succeed")
+}
+
+/// Returns a block response: either 200 with semantic body (for LLM agents) or 403/4xx (for programmatic clients).
+/// When semantic_deny is true, LLMs can "read" the block and stop retrying.
+fn block_response(
+    config: &ProxyConfig,
+    status_when_strict: StatusCode,
+    reason: &str,
+    message_override: Option<&str>,
+) -> Response<ProxyBody> {
+    let message: String = message_override
+        .map(String::from)
+        .unwrap_or_else(|| format!("Aegis Security Block: {}. Do not retry.", reason));
+    if config.semantic_deny {
+        let body = serde_json::json!({
+            "status": "error",
+            "aegis_block": true,
+            "message": message,
+            "reason": reason
+        });
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .header("X-Aegis-Blocked", "true")
+            .body(Full::new(bytes::Bytes::from(
+                serde_json::to_string(&body).unwrap_or_else(|_| r#"{"status":"error","aegis_block":true}"#.to_string()),
+            )))
+            .unwrap_or_else(|_| response_500())
+    } else {
+        Response::builder()
+            .status(status_when_strict)
+            .header("content-type", "application/json")
+            .header("X-Aegis-Blocked", "true")
+            .body(Full::new(bytes::Bytes::from(
+                serde_json::to_string(&serde_json::json!({
+                    "error": "policy violation",
+                    "reason": reason
+                }))
+                .unwrap_or_else(|_| r#"{"error":"policy violation"}"#.to_string()),
+            )))
+            .unwrap_or_else(|_| response_500())
+    }
 }
 
 fn is_json_content_type(headers: &http::HeaderMap<HeaderValue>) -> bool {
@@ -270,9 +394,11 @@ pub async fn handle(
 
     if blocked && enforce_mode == EnforceMode::Strict {
         warn!("strict mode blocked request target={target}");
-        return Ok(response_with(
+        return Ok(block_response(
+            &state.config,
             StatusCode::BAD_GATEWAY,
-            r#"{"error":"blocked by policy in strict mode"}"#,
+            "blocked by policy in strict mode",
+            None,
         ));
     }
     if blocked {
@@ -361,9 +487,11 @@ async fn handle_connect(
         .map(|a| a.to_string())
         .context("CONNECT missing authority host:port")?;
     if is_internal_or_private(&authority) {
-        return Ok(response_with(
+        return Ok(block_response(
+            &state.config,
             StatusCode::FORBIDDEN,
-            r#"{"error":"CONNECT to internal targets forbidden"}"#,
+            "CONNECT to internal targets forbidden",
+            None,
         ));
     }
     info!(target = authority, remote = %remote_addr, "connect tunnel requested");
@@ -389,11 +517,27 @@ async fn run_mitm_tunnel(
     let upgraded = on_upgrade.await.context("upgrade failed")?;
     let io = TokioIo::new(upgraded);
     let acceptor = TlsAcceptor::from(Arc::clone(&state.mitm_server_config));
-    let tls_stream = acceptor
+    let mut tls_stream = acceptor
         .accept(io)
         .await
         .context("TLS handshake failed")?;
-    let io = TokioIo::new(tls_stream);
+
+    let mut peek_buf = [0u8; 8];
+    let n = tls_stream
+        .read(&mut peek_buf)
+        .await
+        .context("failed to peek CONNECT tunnel")?;
+    if n == 0 {
+        return Err(anyhow::anyhow!("CONNECT tunnel closed by client before data"));
+    }
+    let peeked = peek_buf[..n].to_vec();
+    if !looks_like_http(&peeked) {
+        return Err(anyhow::anyhow!(
+            "Non-HTTP protocol detected on CONNECT tunnel to {}; Aegis V1 supports HTTP/HTTPS only",
+            authority
+        ));
+    }
+    let io = TokioIo::new(PrependReader::new(peeked, tls_stream));
 
     let authority_clone = authority.clone();
     let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
@@ -431,13 +575,12 @@ async fn handle_mitm_request(
         Ok(c) => c,
         Err(e) => {
             if e.downcast_ref::<LengthLimitError>().is_some() {
-                return Ok(Response::builder()
-                    .status(StatusCode::PAYLOAD_TOO_LARGE)
-                    .header("content-type", "application/json")
-                    .body(Full::new(bytes::Bytes::from(
-                        r#"{"error":"payload too large","reason":"request body exceeds 5MB limit"}"#,
-                    )))
-                    .unwrap_or_else(|_| response_500()));
+                return Ok(block_response(
+                    &state.config,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request body exceeds 5MB limit",
+                    Some("Aegis Security Block: Payload too large. Reduce request body size. Do not retry."),
+                ));
             }
             return Err(e.into());
         }
@@ -452,6 +595,20 @@ async fn handle_mitm_request(
 
     let identity = get_identity(&parts.headers);
     let headers_map = headers_to_map(&parts.headers);
+
+    if let Some(ref registry) = state.schema_registry {
+        if let Some(ref body_val) = body_json {
+            if let Err(validation_errors) = registry.validate(&host, method.as_str(), path_q, body_val) {
+                let reason = validation_errors.join("; ");
+                let msg = format!(
+                    "Aegis Schema Validation Failed: {}. Do not retry with same payload.",
+                    reason
+                );
+                return Ok(block_response(&state.config, StatusCode::BAD_REQUEST, &reason, Some(&msg)));
+            }
+        }
+    }
+
     let rego_input = PayloadRegoInput {
         method: method.as_str().to_string(),
         path: path_q.to_string(),
@@ -465,17 +622,12 @@ async fn handle_mitm_request(
         match engine.evaluate(&rego_input) {
             Ok(decision) if !decision.allow => {
                 let reason = decision.reason.unwrap_or_else(|| "policy violation".to_string());
-                return Ok(Response::builder()
-                    .status(StatusCode::FORBIDDEN)
-                    .header("content-type", "application/json")
-                    .body(Full::new(bytes::Bytes::from(
-                        serde_json::to_string(&serde_json::json!({
-                            "error": "policy violation",
-                            "reason": reason
-                        }))
-                        .unwrap_or_else(|_| r#"{"error":"policy violation"}"#.to_string()),
-                    )))
-                    .unwrap_or_else(|_| response_500()));
+                return Ok(block_response(
+                    &state.config,
+                    StatusCode::FORBIDDEN,
+                    &reason,
+                    None,
+                ));
             }
             Err(e) => {
                 tracing::warn!("payload policy evaluation error: {e}");
@@ -495,6 +647,30 @@ async fn handle_mitm_request(
     let mut headers = parts.headers.clone();
     headers.remove("proxy-connection");
     headers.remove("Proxy-Connection");
+
+    let trace_hash = {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(method.as_str().as_bytes());
+        hasher.update(path_q.as_bytes());
+        hasher.update(host.as_bytes());
+        hasher.update(&body_bytes);
+        hasher.update(chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_le_bytes().as_slice());
+        format!("0x{}", hasher.finalize().to_hex())
+    };
+    headers.insert(
+        "x-aegis-trace",
+        http::HeaderValue::from_str(&trace_hash).unwrap_or_else(|_| http::HeaderValue::from_static("invalid")),
+    );
+    if let Some(ref c) = identity.user_id {
+        if let Ok(v) = http::HeaderValue::from_str(c) {
+            let _ = headers.insert("x-aegis-caller", v);
+        }
+    } else if let Some(ref s) = identity.session_id {
+        if let Ok(v) = http::HeaderValue::from_str(s) {
+            let _ = headers.insert("x-aegis-caller", v);
+        }
+    }
+
     let upstream_res = state
         .client
         .request(method, &target_url)
@@ -506,13 +682,12 @@ async fn handle_mitm_request(
     let status = upstream_res.status();
     let headers = upstream_res.headers().clone();
     if upstream_res.content_length().unwrap_or(0) > MAX_RESPONSE_BYTES {
-        return Ok(Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .header("content-type", "application/json")
-            .body(Full::new(bytes::Bytes::from(
-                r#"{"error":"upstream response too large"}"#,
-            )))
-            .unwrap_or_else(|_| response_500()));
+        return Ok(block_response(
+            &state.config,
+            StatusCode::BAD_GATEWAY,
+            "upstream response too large",
+            Some("Aegis: Upstream response exceeds size limit. Do not retry."),
+        ));
     }
     let mut body_stream = upstream_res.bytes_stream();
     let mut total: u64 = 0;
@@ -521,13 +696,12 @@ async fn handle_mitm_request(
         let chunk = chunk?;
         total += chunk.len() as u64;
         if total > MAX_RESPONSE_BYTES {
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .header("content-type", "application/json")
-                .body(Full::new(bytes::Bytes::from(
-                    r#"{"error":"upstream response too large"}"#,
-                )))
-                .unwrap_or_else(|_| response_500()));
+            return Ok(block_response(
+                &state.config,
+                StatusCode::BAD_GATEWAY,
+                "upstream response too large",
+                Some("Aegis: Upstream response exceeds size limit. Do not retry."),
+            ));
         }
         body_buf.extend_from_slice(&chunk);
     }

@@ -115,6 +115,8 @@ pub struct PotReceipt {
     pub policy_commitment: String,
     pub trace_hash: String,
     pub identity_hash: Option<String>,
+    /// BLAKE3(trace_hash || identity_hash || timestamp_ns) - single binding hash for audit verification.
+    pub combined_hash: String,
     pub timestamp_ns: i64,
     pub signature: String,
     pub public_key: String,

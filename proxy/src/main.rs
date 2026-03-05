@@ -15,6 +15,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 mod certs;
 mod intercept;
 mod payload_policy;
+mod schema_validator;
 mod trace_log;
 
 use certs::{build_mitm_server_config, RootCa};
@@ -52,6 +53,9 @@ async fn main() -> Result<()> {
     let bind = std::env::var("PROXY_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let trace_wal =
         std::env::var("TRACE_WAL_PATH").unwrap_or_else(|_| "./data/proxy-trace.jsonl".to_string());
+    let semantic_deny = std::env::var("SEMANTIC_DENY")
+        .map(|v| v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("1"))
+        .unwrap_or(true);
 
     let policy = read_policy(&policy_path).unwrap_or_else(|err| {
         error!("failed to load policy from {}: {}; defaulting empty", policy_path, err);
@@ -76,16 +80,30 @@ async fn main() -> Result<()> {
         .map(Arc::new)
         .ok();
 
+    let schema_registry = std::env::var("SCHEMA_REGISTRY_PATH")
+        .ok()
+        .or_else(|| std::env::var("SCHEMA_DIR").ok().map(|d| format!("{}/registry.json", d)));
+    let schema_registry = schema_registry
+        .as_ref()
+        .and_then(|p| schema_validator::SchemaRegistry::load_from_path(p).ok().flatten())
+        .map(Arc::new);
+
+    if schema_registry.is_some() {
+        info!("Schema registry loaded for request body validation");
+    }
+
     let state = ProxyState {
         config: Arc::new(ProxyConfig {
             enforce_mode,
             verifier_url,
             policy,
+            semantic_deny,
         }),
         logger: TraceLogger::new(&trace_wal)?,
         client: reqwest::Client::new(),
         mitm_server_config,
         payload_engine,
+        schema_registry,
         ca_pem: Some(ca_pem),
     };
 

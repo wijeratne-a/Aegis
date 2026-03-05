@@ -37,3 +37,7 @@ export NODE_EXTRA_CA_CERTS=/etc/aegis/ca.crt
 ## Without CA Trust
 
 If agents do not set the CA bundle, HTTPS requests through the proxy will fail with certificate verification errors. Plain HTTP requests (sent via the proxy without CONNECT) are unaffected.
+
+## Protocol Scope (V1)
+
+Aegis V1 supports **HTTP/HTTPS only**. CONNECT tunnels carrying non-HTTP protocols (e.g. PostgreSQL wire, Redis, raw TCP) are rejected with a clear error. Database clients that use native wire protocols must not be routed through the Aegis proxy.

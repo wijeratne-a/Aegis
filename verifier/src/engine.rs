@@ -29,6 +29,7 @@ struct UnsignedReceipt<'a> {
     policy_commitment: &'a str,
     trace_hash: String,
     identity_hash: Option<String>,
+    combined_hash: String,
     timestamp_ns: i64,
 }
 
@@ -71,11 +72,20 @@ pub async fn verify_trace(
     let receipt_id = Uuid::new_v4().to_string();
     let identity_hash = identity_hash(&request.identity_context)?;
 
+    let combined_binding = format!(
+        "{}\n{}\n{}",
+        trace_hash,
+        identity_hash.as_deref().unwrap_or(""),
+        timestamp_ns
+    );
+    let combined_hash = format!("0x{}", blake3::hash(combined_binding.as_bytes()).to_hex());
+
     let unsigned = UnsignedReceipt {
         receipt_id: &receipt_id,
         policy_commitment: &request.policy_commitment,
         trace_hash: trace_hash.clone(),
         identity_hash: identity_hash.clone(),
+        combined_hash: combined_hash.clone(),
         timestamp_ns,
     };
     let unsigned_bytes =
@@ -87,6 +97,7 @@ pub async fn verify_trace(
         policy_commitment: request.policy_commitment.clone(),
         trace_hash,
         identity_hash,
+        combined_hash,
         timestamp_ns,
         signature: hex_encode(&signature),
         public_key: hex_encode(&key_provider.public_key_bytes()),
