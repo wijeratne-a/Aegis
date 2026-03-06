@@ -22,8 +22,28 @@ __pycache__/
 *.pyc
 
 # Next.js
-web/node_modules/
-web/.next/
-web/.env.local
-web/.env*.local
-web/tsconfig.tsbuildinfo
+node_modules/
+dashboard/node_modules/
+sdks/nodejs/node_modules/
+sdks/nodejs/dist/
+dashboard/.next/
+dashboard/.env.local
+dashboard/.env*.local
+dashboard/tsconfig.tsbuildinfo
+
+# Runtime artifacts
+sdks/python/aegis-trace-wal.jsonl
+core/verifier/policies.db
+*.sqlite3
+*.db
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env*.example
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo

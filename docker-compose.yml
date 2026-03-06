@@ -1,7 +1,7 @@
 services:
   verifier:
     build:
-      context: ./verifier
+      context: ./core/verifier
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
@@ -18,7 +18,7 @@ services:
 
   proxy:
     build:
-      context: ./proxy
+      context: ./core/proxy
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
@@ -39,7 +39,7 @@ services:
 
   web:
     build:
-      context: ./web
+      context: ./dashboard
       dockerfile: Dockerfile
     ports:
       - "3001:3000"

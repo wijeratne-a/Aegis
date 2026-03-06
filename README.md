@@ -1,0 +1,82 @@
+# Aegis
+
+Zero Trust Network Access (ZTNA) proxy and cryptographic verifier for AI agents. Aegis inspects and enforces policy on outbound agent traffic, producing cryptographically verifiable Proof-of-Task receipts.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph DataPlane [Data Plane]
+        Proxy[core/proxy]
+        Verifier[core/verifier]
+        Proxy -->|verify traces| Verifier
+    end
+
+    subgraph ControlPlane [Control Plane]
+        Dashboard[dashboard]
+        Dashboard -->|policy registration| Verifier
+        Verifier -->|webhook alerts| Dashboard
+    end
+
+    subgraph Agents [AI Agents]
+        PythonSDK[sdks/python]
+        NodeSDK[sdks/nodejs]
+    end
+
+    PythonSDK -->|HTTP via proxy| Proxy
+    NodeSDK -->|HTTP via proxy| Proxy
+```
+
+- **Data plane** (`core/proxy`, `core/verifier`): TLS MITM proxy with Rego policy evaluation; verifier signs receipts and validates traces
+- **Control plane** (`dashboard`): Next.js UI for policy management and receipt viewing
+- **SDKs** (`sdks/python`, `sdks/nodejs`): Lightweight client libraries for agents to register policies and emit traced calls
+
+## Quick Start
+
+```bash
+# Start infrastructure
+docker compose up -d verifier proxy web prometheus grafana
+
+# Verifier: http://localhost:3000
+# Proxy:   http://localhost:8080
+# Dashboard: http://localhost:3001
+# Grafana:  http://localhost:3002 (admin/admin)
+```
+
+See [docs/demo/getting-started.md](docs/demo/getting-started.md) for full demo instructions.
+
+## Component Index
+
+| Component | Path | Description |
+|-----------|------|-------------|
+| Proxy | [core/proxy](core/proxy) | Forward proxy with TLS MITM, payload parsing, Rego policy |
+| Verifier | [core/verifier](core/verifier) | Cryptographic verification and receipt signing |
+| Crypto | [core/crypto](core/crypto) | Key generation and manifest signing (dev utility) |
+| Python SDK | [sdks/python](sdks/python) | Aegis Proof-of-Task SDK for Python agents |
+| Node.js SDK | [sdks/nodejs](sdks/nodejs) | Aegis Proof-of-Task SDK for Node.js |
+| Dashboard | [dashboard](dashboard) | Next.js control plane UI |
+
+## Open Core
+
+**Aegis Community Edition** is open source under the [Apache 2.0 License](LICENSE). Enterprise features (RBAC, advanced audit, SOC2 compliance) are planned and available under commercial license. Contact for licensing.
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Proxy CA Trust](docs/proxy_mitm_ca_trust.md)
+- [Security Audit](docs/SECURITY_AUDIT.md)
+- [Design Standards](docs/web/design_standards.md)
+- [Runbooks](docs/runbooks/)
+- [Demo Getting Started](docs/demo/getting-started.md)
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report bugs, submit PRs, and contribute.
+
+## Security
+
+Report vulnerabilities per [SECURITY.md](SECURITY.md).
+
+## License
+
+[Apache License 2.0](LICENSE)
