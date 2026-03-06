@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useReceipts, useSession } from "@/lib/api";
+import { getHumanContext, formatAgentIdFallback } from "@/lib/demo-identity-labels";
 import { sanitizeForDisplay } from "@/lib/sanitize";
 import type { PotReceipt } from "@/lib/types";
 
@@ -28,7 +29,24 @@ function MaskedText({ text, masked }: { text: string; masked: boolean }) {
   return <pre className="mt-1 break-all rounded bg-muted/50 p-2">{sanitizeForDisplay(display)}</pre>;
 }
 
-function PotReceiptCard({ proof, masked }: { proof: PotReceipt; masked: boolean }) {
+function PotReceiptCard({
+  proof,
+  masked,
+  receivedAt,
+}: {
+  proof: PotReceipt;
+  masked: boolean;
+  receivedAt?: string;
+}) {
+  const hasIdentity = proof.agent_id != null || proof.identity_hash != null;
+  const humanContext = proof.agent_id ? getHumanContext(proof.agent_id) : null;
+  const actorDisplay = humanContext
+    ? `${humanContext.displayName} (${humanContext.role})`
+    : proof.agent_id
+      ? formatAgentIdFallback(proof.agent_id)
+      : null;
+  const sessionTime = receivedAt ?? (proof.timestamp_ns ? formatTimestamp(proof.timestamp_ns) : null);
+
   return (
     <Card className="border-border/50">
       <CardHeader>
@@ -38,6 +56,65 @@ function PotReceiptCard({ proof, masked }: { proof: PotReceipt; masked: boolean 
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 font-mono text-sm">
+        {actorDisplay && (
+          <div className="rounded border border-blue-500/30 bg-blue-50/50 p-3 dark:border-blue-500/20 dark:bg-blue-950/20">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Human Context
+            </span>
+            <div className="mt-2 flex flex-wrap gap-4">
+              <div>
+                <span className="text-xs text-muted-foreground">Actor</span>
+                <p className="mt-0.5 font-medium">{sanitizeForDisplay(actorDisplay)}</p>
+              </div>
+              {sessionTime && (
+                <div>
+                  <span className="text-xs text-muted-foreground">Session</span>
+                  <p className="mt-0.5 text-sm">{sanitizeForDisplay(sessionTime)}</p>
+                </div>
+              )}
+              {humanContext && (
+                <div>
+                  <span className="text-xs text-muted-foreground">Authorization level</span>
+                  <p className="mt-0.5 text-sm">{sanitizeForDisplay(humanContext.tierOrTeam)}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {hasIdentity && (
+          <div className="rounded border border-border/50 bg-accent/20 p-3">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Identity Context
+            </span>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Human identity cryptographically bound to this receipt
+            </p>
+            <div className="mt-2 space-y-2">
+              {proof.agent_id && (
+                <div>
+                  <span className="flex items-center gap-2 text-muted-foreground">
+                    agent_id:
+                    <Badge variant="outline" className="text-xs">
+                      Agent
+                    </Badge>
+                  </span>
+                  <pre className="mt-1 break-all rounded bg-muted/50 p-2">{sanitizeForDisplay(proof.agent_id)}</pre>
+                </div>
+              )}
+              {proof.identity_hash && (
+                <div>
+                  <span className="flex items-center gap-2 text-muted-foreground">
+                    identity_hash:
+                    <Badge variant="outline" className="text-xs">
+                      BLAKE3-bound
+                    </Badge>
+                  </span>
+                  <pre className="mt-1 break-all rounded bg-muted/50 p-2">{sanitizeForDisplay(proof.identity_hash)}</pre>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
         {proof.reasoning_summary && (
           <div className="rounded border border-border/50 bg-accent/20 p-3">
             <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -57,7 +134,7 @@ function PotReceiptCard({ proof, masked }: { proof: PotReceipt; masked: boolean 
           </span>
           <pre className="mt-1 break-all rounded bg-muted/50 p-2">{sanitizeForDisplay(proof.trace_hash)}</pre>
         </div>
-        {proof.identity_hash && (
+        {proof.identity_hash && !hasIdentity && (
           <div>
             <span className="text-muted-foreground">identity_hash:</span>
             <pre className="mt-1 break-all rounded bg-muted/50 p-2">{sanitizeForDisplay(proof.identity_hash)}</pre>
@@ -153,7 +230,7 @@ export default function ReceiptsPage() {
                 <p className="text-xs text-muted-foreground">
                   received_at: {masked ? maskSensitiveData(entry.received_at) : entry.received_at}
                 </p>
-                <PotReceiptCard proof={entry.value} masked={masked} />
+                <PotReceiptCard proof={entry.value} masked={masked} receivedAt={entry.received_at} />
               </div>
             ))
           )}

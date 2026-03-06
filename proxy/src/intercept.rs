@@ -113,7 +113,20 @@ fn sanitize_header_value(s: &str) -> bool {
     !s.bytes().any(|b| b < 0x20 || b == 0x7f)
 }
 
+/// When AEGIS_DEMO_EVIL_PORT is set (e.g. "19999"), allow 127.0.0.1:{port} for local injection demo.
+fn is_demo_evil_host_allowed(authority: &str) -> bool {
+    if let Ok(port) = std::env::var("AEGIS_DEMO_EVIL_PORT") {
+        if !port.is_empty() && authority == format!("127.0.0.1:{}", port) {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_internal_or_private(authority: &str) -> bool {
+    if is_demo_evil_host_allowed(authority) {
+        return false;
+    }
     let host = authority.split(':').next().unwrap_or(authority).trim();
     let host_lower = host.to_lowercase();
     if host_lower == "localhost" || host_lower.ends_with(".local") {
@@ -133,8 +146,12 @@ fn is_internal_or_private(authority: &str) -> bool {
 
 /// Returns true if any resolved IP for the host is loopback, private, or link-local (SSRF unsafe).
 /// Uses tokio::net::lookup_host for async DNS resolution. Fails closed on resolution errors.
-async fn host_resolves_to_unsafe_ip(host: &str) -> Result<bool> {
-    let host = host.split(':').next().unwrap_or(host).trim();
+async fn host_resolves_to_unsafe_ip(host_or_authority: &str) -> Result<bool> {
+    let host = host_or_authority.split(':').next().unwrap_or(host_or_authority).trim();
+    // Demo bypass: when AEGIS_DEMO_EVIL_PORT is set, allow 127.0.0.1 for local evil server
+    if host == "127.0.0.1" && std::env::var("AEGIS_DEMO_EVIL_PORT").map(|p| !p.is_empty()).unwrap_or(false) {
+        return Ok(false);
+    }
     let host_lower = host.to_lowercase();
     if host_lower == "localhost" || host_lower.ends_with(".local") {
         return Ok(true);
@@ -816,9 +833,10 @@ pub async fn handle(
     };
 
     let status = upstream.status();
+    let headers = upstream.headers().clone();
     let mut resp_builder = Response::builder().status(status);
-    for (name, value) in upstream.headers() {
-        resp_builder = resp_builder.header(name, value);
+    for (name, value) in &headers {
+        resp_builder = resp_builder.header(name.as_str(), value.clone());
     }
     let response_body = match upstream.bytes().await {
         Ok(b) => b,
@@ -845,6 +863,58 @@ pub async fn handle(
             return Err(err.into());
         }
     };
+
+    if let Some(ref engine) = state.response_policy_engine {
+        let path_q = target_uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+        let response_input = ResponseRegoInput {
+            method: method.as_str().to_string(),
+            path: path_q.to_string(),
+            host: target_host.clone(),
+            status: status.as_u16(),
+            body: std::str::from_utf8(&response_body).ok().map(|v| v.to_string()),
+            headers: headers_to_map(&headers),
+        };
+        if let Ok(decision) = engine.evaluate(&response_input) {
+            if !decision.allow {
+                let reason = decision
+                    .reason
+                    .unwrap_or_else(|| "response policy violation".to_string());
+                telemetry::increment_blocked(&target_host, classify_violation(&reason));
+                append_trace_entry(
+                    &state,
+                    request_id.clone(),
+                    &method,
+                    &target,
+                    true,
+                    "blocked",
+                    has_identity,
+                    Some(&reason),
+                );
+                emit_webhook_event(
+                    &state,
+                    WebhookEvent::new(
+                        "response_policy_block",
+                        request_id.clone(),
+                        method.as_str(),
+                        target.clone(),
+                        reason.clone(),
+                    ),
+                );
+                let injection_override = if decision.response_injection.is_some() {
+                    Some("AEGIS INTERCEPT: Malicious Prompt Injection detected in tool response.")
+                } else {
+                    None
+                };
+                return Ok(block_response(
+                    &state.config,
+                    StatusCode::BAD_GATEWAY,
+                    &reason,
+                    injection_override,
+                ));
+            }
+        }
+    }
+
     let resp = resp_builder
         .body(Full::new(response_body))
         .unwrap_or_else(|_| response_500());

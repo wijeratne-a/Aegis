@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -88,30 +89,39 @@ export default function AlertsPage() {
             <p className="text-sm text-muted-foreground">No alerts yet.</p>
           ) : (
             <div className="space-y-4">
-              {alerts.map((a) => (
-                <div
-                  key={a.id}
-                  className="rounded-lg border border-border/50 bg-muted/20 p-4"
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge className={severityColor(a.severity as ViolationSeverity)}>
-                      {a.severity}
-                    </Badge>
-                    <span className="text-xs text-muted-foreground">
-                      {formatTime(a.received_at)}
-                    </span>
-                  </div>
-                  <p className="mt-2 font-mono text-sm">{sanitizeForDisplay(a.reason)}</p>
-                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                    <span>
-                      <span className="font-medium">domain:</span> {sanitizeForDisplay(a.domain)}
-                    </span>
-                    <span>
-                      <span className="font-medium">policy:</span> {sanitizeForDisplay(truncateHash(a.policy_commitment))}
-                    </span>
-                  </div>
-                </div>
-              ))}
+              {alerts.map((a) => {
+                const incidentId = a.incident_id ?? a.id;
+                return (
+                  <Link
+                    key={a.id}
+                    href={`/dashboard/incidents/${encodeURIComponent(incidentId)}`}
+                    className="block rounded-lg border border-border/50 bg-muted/20 p-4 transition-colors hover:bg-muted/40"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge className={severityColor(a.severity as ViolationSeverity)}>
+                        {a.severity}
+                      </Badge>
+                      {incidentId && (
+                        <span className="text-xs text-muted-foreground font-mono">
+                          {incidentId}
+                        </span>
+                      )}
+                      <span className="text-xs text-muted-foreground">
+                        {formatTime(a.received_at)}
+                      </span>
+                    </div>
+                    <p className="mt-2 font-mono text-sm">{sanitizeForDisplay(a.reason)}</p>
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                      <span>
+                        <span className="font-medium">domain:</span> {sanitizeForDisplay(a.domain)}
+                      </span>
+                      <span>
+                        <span className="font-medium">policy:</span> {sanitizeForDisplay(truncateHash(a.policy_commitment))}
+                      </span>
+                    </div>
+                  </Link>
+                );
+              })}
             </div>
           )}
         </CardContent>

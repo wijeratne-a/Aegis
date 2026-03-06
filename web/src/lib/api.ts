@@ -142,3 +142,33 @@ export function useSession() {
     staleTime: 60_000,
   });
 }
+
+type IncidentResponse = {
+  id: string;
+  incident_id: string;
+  event: string;
+  policy_commitment: string;
+  domain: string;
+  reason: string;
+  timestamp_ns: number;
+  received_at: string;
+  severity: string;
+};
+
+export function useIncident(incidentId: string | null) {
+  return useQuery({
+    queryKey: ["incident", incidentId],
+    queryFn: async () => {
+      if (!incidentId) return null;
+      const res = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}`, {
+        credentials: "include",
+      });
+      if (!res.ok) {
+        if (res.status === 404) return null;
+        throw new Error("Failed to load incident");
+      }
+      return res.json() as Promise<IncidentResponse>;
+    },
+    enabled: !!incidentId,
+  });
+}

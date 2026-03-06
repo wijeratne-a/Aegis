@@ -36,6 +36,7 @@ export interface PotReceipt {
   receipt_id: string;
   policy_commitment: string;
   trace_hash: string;
+  agent_id?: string;
   identity_hash?: string;
   combined_hash?: string;
   timestamp_ns: number;
@@ -75,6 +76,7 @@ export interface Agent {
 /** Policy violation alert from verifier webhook */
 export interface Alert {
   id: string;
+  incident_id?: string;
   event: string;
   policy_commitment: string;
   domain: string;

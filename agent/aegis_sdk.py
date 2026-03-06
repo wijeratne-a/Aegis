@@ -101,6 +101,7 @@ class Aegis:
         batch_size: int = 8,
         flush_interval_s: float = 0.4,
         wal_path: str = "./aegis-trace-wal.jsonl",
+        agent_id: Optional[str] = None,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         iam_role: Optional[str] = None,
@@ -116,6 +117,7 @@ class Aegis:
         self.domain: str = "defi"
         self.version: str = "1.0"
         self.public_values: Dict[str, Any] = {}
+        self.agent_id = agent_id
         self.identity_context: Dict[str, Optional[str]] = {
             "session_id": session_id,
             "user_id": user_id,
@@ -303,6 +305,8 @@ class Aegis:
 
     def _identity_headers(self) -> Dict[str, str]:
         headers: Dict[str, str] = {}
+        if self.agent_id:
+            headers["X-Aegis-Agent-Id"] = str(self.agent_id)
         if self.identity_context.get("session_id"):
             headers["X-Aegis-Session-Id"] = str(self.identity_context["session_id"])
         if self.identity_context.get("user_id"):

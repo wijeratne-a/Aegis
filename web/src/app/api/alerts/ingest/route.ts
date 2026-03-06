@@ -56,12 +56,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid webhook payload" }, { status: 400 });
   }
 
+  const incidentId = `inc-${new Date().toISOString().slice(0, 10)}-${crypto.randomUUID().slice(0, 8)}`;
   pushAlert({
     event: result.data.event,
     policy_commitment: result.data.policy_commitment,
     domain: result.data.domain,
     reason: result.data.reason,
     timestamp_ns: result.data.timestamp_ns,
+    incident_id: incidentId,
   });
 
   return NextResponse.json({ status: "ok" }, { status: 202 });

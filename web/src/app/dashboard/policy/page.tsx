@@ -4,7 +4,8 @@ import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Copy, Plus, Trash2 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Copy, GitBranch, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -98,6 +99,33 @@ export default function PolicyBuilderPage() {
       <p className="mt-2 text-muted-foreground">
         Configure max_spend and restricted_endpoints. Submit to get a policy commitment hash.
       </p>
+
+      <Card className="mt-8">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <GitBranch className="h-5 w-5" />
+            Active Policy
+          </CardTitle>
+          <CardDescription>
+            Policy source and version for audit. Deploy via Git merge; Aegis picks up changes automatically.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className="bg-green-500/10 text-green-700 border-green-500/30">
+              Source: Git
+            </Badge>
+            <span className="text-sm text-muted-foreground">Policy file:</span>
+            <code className="rounded bg-muted/50 px-2 py-0.5 font-mono text-xs">
+              policies/payload.rego
+            </code>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            Commit: <span className="font-mono">feat: add /salary to restricted endpoints</span>
+          </p>
+          <p className="text-xs text-muted-foreground">Last synced: just now</p>
+        </CardContent>
+      </Card>
 
       <Card className="mt-8">
         <CardHeader>

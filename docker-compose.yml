@@ -1,109 +1,88 @@
 services:
-  aegis-verifier:
+  verifier:
     build:
       context: ./verifier
-    container_name: aegis-verifier
-    environment:
-      # Use env + AEGIS_SIGNING_KEY_HEX for production; local + AEGIS_DEV_ALLOW_EPHEMERAL_KEY for dev
-      KEY_PROVIDER: ${KEY_PROVIDER:-env}
-      AEGIS_DEV_ALLOW_EPHEMERAL_KEY: ${AEGIS_DEV_ALLOW_EPHEMERAL_KEY:-0}
-      POLICY_ENGINE: rego
-      POLICY_DIR: /etc/aegis/policies
-      AEGIS_CLOUD_URL: http://host.docker.internal:3001/api/receipts
-      AEGIS_LOG_FORMAT: json
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-      AEGIS_SIGNING_KEY_HEX: ${AEGIS_SIGNING_KEY_HEX:-}
-    volumes:
-      - ./policies:/etc/aegis/policies:ro
+      dockerfile: Dockerfile
     ports:
       - "3000:3000"
-
-  aegis-proxy:
-    build:
-      context: ./proxy
-    container_name: aegis-proxy
-    depends_on:
-      - aegis-verifier
     environment:
-      ENFORCE_MODE: strict
-      POLICY_PATH: /etc/aegis/policy.json
-      # Use https:// when verifier TLS is enabled (mount VERIFIER_TLS_CA_PATH, VERIFIER_TLS_CERT_PATH, VERIFIER_TLS_KEY_PATH)
-      VERIFIER_URL: ${VERIFIER_URL:-http://aegis-verifier:3000}
-      TRACE_WAL_PATH: /var/lib/aegis/proxy-trace.jsonl
-      AEGIS_LOG_FORMAT: json
-      REDIS_URL: redis://redis:6379
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-    volumes:
-      - ./policy.json:/etc/aegis/policy.json:ro
-      - proxy-data:/var/lib/aegis
-    ports:
-      - "8080:8080"
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
+      KEY_PROVIDER: local
+      AEGIS_DEV_ALLOW_EPHEMERAL_KEY: "1"
+      WEBHOOK_URL: http://web:3000/api/alerts/ingest
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-demo-webhook-secret-min-32-characters-long}
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/healthz"]
       interval: 10s
       timeout: 5s
       retries: 3
 
+  proxy:
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      ENFORCE_MODE: strict
+      VERIFIER_URL: http://verifier:3000
+      SEMANTIC_DENY: "true"
+      METRICS_ENABLED: "true"
+      AEGIS_DEMO_EVIL_PORT: "19999"
+    depends_on:
+      verifier:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3000"
+    environment:
+      NEXT_PUBLIC_VERIFIER_URL: http://localhost:3000
+      NEXT_PUBLIC_PROXY_URL: http://localhost:8080
+      NEXT_PUBLIC_API_URL: http://localhost:3000
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-demo-webhook-secret-min-32-characters-long}
+    depends_on:
+      - verifier
+
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus-demo.yaml:/etc/prometheus/prometheus.yml
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    depends_on:
+      - proxy
+
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
-    env_file:
-      - ./deploy/otel-collector.env.example
+    image: otel/opentelemetry-collector-contrib:0.91.0
+    volumes:
+      - ./deploy/otel-collector-config.yaml:/etc/otelcol/config.yaml
+    command: ["--config=/etc/otelcol/config.yaml"]
     ports:
       - "4317:4317"
       - "4318:4318"
       - "8889:8889"
-    volumes:
-      - ./deploy/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
-    depends_on:
-      - prometheus
-
-  fluent-bit:
-    image: fluent/fluent-bit:3.0
-    profiles:
-      - observability
-    command: ["-i", "tail", "-p", "path=/var/lib/aegis/proxy-trace.jsonl", "-o", "forward", "-p", "host=otel-collector", "-p", "port=24224"]
-    volumes:
-      - proxy-data:/var/lib/aegis:ro
-    depends_on:
-      - otel-collector
-
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./deploy/prometheus.yaml:/etc/prometheus/prometheus.yml
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:10.2.0
     ports:
-      - "3001:3000"
+      - "3002:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=aegis
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning
     depends_on:
       - prometheus
-
-  splunk:
-    image: splunk/splunk:latest
-    profiles:
-      - observability
-    environment:
-      - SPLUNK_START_ARGS=--accept-license
-      - SPLUNK_PASSWORD=${SPLUNK_PASSWORD:-changeme}
-      - SPLUNK_HEC_TOKEN=${SPLUNK_HEC_TOKEN:-aegis-hec-token}
-    ports:
-      - "8000:8000"
-      - "8088:8088"
-    volumes:
-      - splunk-data:/opt/splunk/var
-
-volumes:
-  proxy-data:
-  splunk-data:

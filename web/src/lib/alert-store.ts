@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 
 export type StoredAlert = {
   id: string;
+  incident_id: string;
   event: string;
   policy_commitment: string;
   domain: string;
@@ -18,12 +19,16 @@ function generateId(payload: { event: string; policy_commitment: string; domain:
   return createHash("sha256").update(raw).digest("hex").slice(0, 24);
 }
 
-export function pushAlert(alert: Omit<StoredAlert, "id" | "received_at">): StoredAlert {
+export function pushAlert(alert: Omit<StoredAlert, "id" | "received_at"> & { incident_id?: string }): StoredAlert {
   const received_at = new Date().toISOString();
   const id = generateId(alert);
+  const incident_id =
+    alert.incident_id ??
+    `inc-${new Date().toISOString().slice(0, 10)}-${createHash("sha256").update(`${id}:${Date.now()}`).digest("hex").slice(0, 8)}`;
   const stored: StoredAlert = {
     ...alert,
     id,
+    incident_id,
     received_at,
   };
   alerts.unshift(stored);
@@ -51,4 +56,8 @@ export function listAlerts(options?: {
 
 export function getAlertCount(): number {
   return alerts.length;
+}
+
+export function getAlertByIncidentId(incident_id: string): StoredAlert | undefined {
+  return alerts.find((a) => a.incident_id === incident_id);
 }
