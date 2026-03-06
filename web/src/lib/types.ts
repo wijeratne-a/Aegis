@@ -11,6 +11,8 @@ export interface TraceEntry {
   amount?: number;
   table?: string;
   details?: Record<string, unknown>;
+  reasoning_summary?: string;
+  model_id?: string;
 }
 
 export interface PublicValues {
@@ -39,6 +41,7 @@ export interface PotReceipt {
   timestamp_ns: number;
   signature: string;
   public_key: string;
+  reasoning_summary?: string;
 }
 
 export interface VerifyResponse {

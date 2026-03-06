@@ -38,12 +38,23 @@ function PotReceiptCard({ proof, masked }: { proof: PotReceipt; masked: boolean 
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 font-mono text-sm">
+        {proof.reasoning_summary && (
+          <div className="rounded border border-border/50 bg-accent/20 p-3">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Agent Reasoning
+            </span>
+            <p className="mt-1 text-sm">{sanitizeForDisplay(proof.reasoning_summary)}</p>
+          </div>
+        )}
         <div>
           <span className="text-muted-foreground">policy_commitment:</span>
           <pre className="mt-1 break-all rounded bg-muted/50 p-2">{sanitizeForDisplay(proof.policy_commitment)}</pre>
         </div>
         <div>
-          <span className="text-muted-foreground">trace_hash:</span>
+          <span className="flex items-center gap-2 text-muted-foreground">
+            trace_hash:
+            <Badge variant="outline" className="text-xs">BLAKE3</Badge>
+          </span>
           <pre className="mt-1 break-all rounded bg-muted/50 p-2">{sanitizeForDisplay(proof.trace_hash)}</pre>
         </div>
         {proof.identity_hash && (
@@ -63,7 +74,10 @@ function PotReceiptCard({ proof, masked }: { proof: PotReceipt; masked: boolean 
           <pre className="mt-1 rounded bg-muted/50 p-2">{formatTimestamp(proof.timestamp_ns)}</pre>
         </div>
         <div>
-          <span className="text-muted-foreground">signature:</span>
+          <span className="flex items-center gap-2 text-muted-foreground">
+            signature:
+            <Badge variant="outline" className="text-xs">Ed25519</Badge>
+          </span>
           <pre className="mt-1 break-all rounded bg-muted/50 p-2">{sanitizeForDisplay(proof.signature)}</pre>
         </div>
         <div>

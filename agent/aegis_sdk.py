@@ -149,6 +149,23 @@ class Aegis:
         self.public_values = public_values
         return self.policy_commitment
 
+    def with_reasoning(self, reasoning: str) -> "Aegis":
+        """
+        Context manager that injects reasoning into the next traced call.
+        Usage:
+            with aegis.with_reasoning("I am transferring because user asked"):
+                transfer_funds(amount=100)
+        """
+        self._pending_reasoning = reasoning
+        return self
+
+    def __enter__(self) -> "Aegis":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
+        self._pending_reasoning = None
+        return False
+
     def trace(self, fn: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -323,9 +340,11 @@ class Aegis:
             "result": _safe_json(result),
             "execution_ms": round(elapsed_ms, 3),
         }
-        reasoning_summary: Optional[str] = None
-        if "reasoning" in kwargs:
+        reasoning_summary: Optional[str] = getattr(self, "_pending_reasoning", None)
+        if reasoning_summary is None and "reasoning" in kwargs:
             reasoning_summary = str(_safe_json(kwargs.get("reasoning")))
+        self._pending_reasoning = None
+        if reasoning_summary is not None:
             details["reasoning"] = reasoning_summary
 
         return {

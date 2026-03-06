@@ -28,6 +28,9 @@ use crate::telemetry;
 use crate::trace_log::TraceLogger;
 use crate::webhook::{self, WebhookEvent};
 
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const RATE_LIMIT_MAX: u32 = 60;
+
 /// HTTP/1.x method prefixes. If the decrypted stream doesn't start with one of these, it's not HTTP.
 const HTTP_METHOD_PREFIXES: &[&[u8]] = &[
     b"GET ", b"HEAD ", b"POST ", b"PUT ", b"DELETE ", b"CONNECT ", b"OPTIONS ", b"TRACE ", b"PATCH ",
@@ -290,6 +293,8 @@ pub struct ProxyState {
     pub ca_pem: Option<String>,
     /// Mutable policy state for hot-reload. Holds (PolicyConfig, Option<PayloadPolicyEngine>).
     pub live_policy: Arc<RwLock<LivePolicy>>,
+    /// Per-IP rate limit: (window_start, count).
+    pub rate_limit: Arc<DashMap<String, (Instant, u32)>>,
 }
 
 pub struct LivePolicy {
@@ -395,7 +400,7 @@ fn block_response(
 ) -> Response<ProxyBody> {
     let message: String = message_override
         .map(String::from)
-        .unwrap_or_else(|| format!("Aegis Security Block: {}. Do not retry.", reason));
+        .unwrap_or_else(|| format!("AEGIS SECURITY BLOCK: {}. Do not retry.", reason));
     if config.semantic_deny {
         let body = serde_json::json!({
             "status": "error",
@@ -760,7 +765,7 @@ pub async fn handle(
                     Some("Aegis Security Block: Payload too large. Reduce request body size. Do not retry."),
                 ));
             }
-            return Err(e.into());
+            return Err(anyhow::anyhow!("body collection failed: {}", e));
         }
     };
     let body_bytes = collected.to_bytes();
@@ -1107,7 +1112,7 @@ async fn handle_mitm_request(
                     Some("Aegis Security Block: Payload too large. Reduce request body size. Do not retry."),
                 ));
             }
-            return Err(e.into());
+            return Err(e);
         }
     };
     let body_bytes = collected.to_bytes();
@@ -1547,7 +1552,12 @@ async fn handle_mitm_request(
                 } else {
                     StatusCode::FORBIDDEN
                 };
-                return Ok(block_response(&state.config, deny_status, &reason, None));
+                let injection_override = if decision.response_injection.is_some() {
+                    Some("AEGIS INTERCEPT: Malicious Prompt Injection detected in tool response.")
+                } else {
+                    None
+                };
+                return Ok(block_response(&state.config, deny_status, &reason, injection_override));
             }
             Err(e) => {
                 telemetry::observe_policy_eval_ms(policy_eval_started.elapsed().as_secs_f64() * 1000.0);

@@ -224,6 +224,12 @@ pub async fn verify_trace(
         serde_json::to_vec(&unsigned).context("failed to serialize PoT receipt for signing")?;
     let signature = key_provider.sign(&unsigned_bytes).await?;
 
+    let reasoning_summary = request
+        .execution_trace
+        .iter()
+        .find_map(|e| e.reasoning_summary.as_deref())
+        .map(|s| s.to_string());
+
     let proof = PotReceipt {
         receipt_id,
         policy_commitment: request.policy_commitment.clone(),
@@ -234,6 +240,7 @@ pub async fn verify_trace(
         agent_id: agent_id.map(|v| v.to_string()),
         signature: hex_encode(&signature),
         public_key: hex_encode(&key_provider.public_key_bytes()),
+        reasoning_summary,
     };
 
     info!(
