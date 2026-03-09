@@ -61,7 +61,7 @@ See [docs/demo/getting-started.md](docs/demo/getting-started.md) for full demo i
 | Tool | Command | Description |
 |------|---------|-------------|
 | Debug Watch | `make debug` or `cargo run --manifest-path dev/cli/Cargo.toml -- debug watch` | Tail proxy trace WAL and show policy decisions, BLAKE3 hashes in real time |
-| Chain Verify | `make verify` or `cargo run --manifest-path tools/aegis-verify/Cargo.toml -- ./data/proxy-trace.jsonl` | Verify BLAKE3 hash chain integrity of a trace log locally |
+| Chain Verify | `make verify` or `cargo run --manifest-path tools/aegis-verify/Cargo.toml -- ./data/proxy-trace.jsonl` | Verify BLAKE3 hash chain of the proxy's WAL (not the SDK's `aegis-trace-wal.jsonl`) |
 
 ## Examples
 

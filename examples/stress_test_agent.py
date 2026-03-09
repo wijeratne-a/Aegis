@@ -54,14 +54,14 @@ async def run_task(client: httpx.AsyncClient, task_type: str) -> dict:
             if isinstance(body, dict) and body.get("valid") is False:
                 return {"allowed": False, "blocked": True, "error": None, "body": body}
             return {"allowed": True, "blocked": False, "error": None, "body": body}
-        return {"allowed": False, "blocked": resp.status_code in (403, 451), "error": resp.text[:200], "body": body}
+        return {"allowed": False, "blocked": resp.status_code in (403, 451, 502), "error": resp.text[:200], "body": body}
     except httpx.HTTPStatusError as e:
         body = {}
         try:
             body = e.response.json() if e.response else {}
         except Exception:
             body = {"raw": str(e.response.text)[:200] if e.response else str(e)}
-        blocked = e.response.status_code in (403, 451) if e.response else False
+        blocked = e.response.status_code in (403, 451, 502) if e.response else False
         return {"allowed": False, "blocked": blocked, "error": str(e), "body": body}
     except Exception as e:
         return {"allowed": False, "blocked": False, "error": str(e), "body": {}}

@@ -96,7 +96,7 @@ python examples/stress_test_agent.py
 ## Developer Tools
 
 - **Debug Watch**: Tail proxy trace WAL in real time: `cargo run --manifest-path dev/cli/Cargo.toml -- debug watch`
-- **Chain Verify**: Verify BLAKE3 hash chain: `cargo run --manifest-path tools/aegis-verify/Cargo.toml -- ./data/proxy-trace.jsonl`
+- **Chain Verify**: Verify BLAKE3 hash chain integrity of the **proxy's** trace log: `cargo run --manifest-path tools/aegis-verify/Cargo.toml -- ./data/proxy-trace.jsonl`. Note: This tool verifies the proxy's WAL (`./data/proxy-trace.jsonl`), not the Python SDK's local crash-recovery WAL (`aegis-trace-wal.jsonl`).
 
 ## Webhook + Alerts
 

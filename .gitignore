@@ -32,6 +32,7 @@ dashboard/.env*.local
 dashboard/tsconfig.tsbuildinfo
 
 # Runtime artifacts
+policy.json
 sdks/python/aegis-trace-wal.jsonl
 aegis-trace-wal.jsonl
 **/aegis-trace-wal.jsonl
