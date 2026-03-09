@@ -23,21 +23,12 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-const pythonSnippet = (policyHash: string) => `from aegis_sdk import Aegis
+const pythonSnippet = (policyHash: string) => `# Env: HTTP_PROXY=${PROXY_BASE} HTTPS_PROXY=${PROXY_BASE}
+# NO_PROXY=127.0.0.1,localhost  REQUESTS_CA_BUNDLE=./deploy/certs/ca.crt
 
-# Force all outbound traffic through local Aegis Proxy
-import os
-os.environ["HTTP_PROXY"] = "${PROXY_BASE}"
-os.environ["HTTPS_PROXY"] = "${PROXY_BASE}"
+from aegis_sdk import Aegis
 
-aegis = Aegis(
-    base_url="${VERIFIER_BASE}",
-    session_id="session-123",
-    user_id="alice",
-    iam_role="customer-support"
-)
-
-# Register policy then run your instrumented function calls
+aegis = Aegis(base_url="${VERIFIER_BASE}", session_id="session-123", user_id="alice")
 policy = {"public_values": {"max_spend": 1000, "restricted_endpoints": ["/admin"]}}
 aegis.init(policy=policy, domain="defi", public_values=policy["public_values"])
 
@@ -47,6 +38,37 @@ def execute_swap(amount: float):
 
 execute_swap(500)
 aegis.close()
+`;
+
+const pythonHttpxSnippet = `# Auto-trace HTTP with aegis_intercept (no decorators)
+# pip install httpx aegis-sdk
+
+import aegis_intercept  # MUST import before httpx
+from aegis_intercept import get_aegis
+import httpx
+
+aegis = get_aegis()
+aegis.init(policy={"public_values": {"restricted_endpoints": ["/admin"]}}, domain="defi", public_values={"restricted_endpoints": ["/admin"]})
+
+resp = httpx.get("https://api.example.com/data")  # Auto-traced via proxy
+aegis.wait_for_results(1)
+aegis.close()
+`;
+
+const nodeSnippet = `// Env: HTTP_PROXY=${PROXY_BASE} HTTPS_PROXY=${PROXY_BASE}
+// NODE_EXTRA_CA_CERTS=./deploy/certs/ca.crt
+
+const { Aegis } = require("aegis-sdk");
+
+(async () => {
+  const aegis = new Aegis({ baseUrl: "${VERIFIER_BASE}" });
+  const policy = { public_values: { max_spend: 1000, restricted_endpoints: ["/admin"] } };
+  await aegis.init(policy, "defi", policy.public_values);
+
+  aegis.trace("execute_swap", "/api/swap", { amount: 500 });
+  const res = await aegis.verify();
+  console.log(res);
+})();
 `;
 
 const webhookConfig = `# Verifier: send policy violations to Control Plane
@@ -88,8 +110,10 @@ export default function IntegrationsPage() {
         </CardHeader>
         <CardContent>
           <Tabs defaultValue="python">
-            <TabsList>
-              <TabsTrigger value="python">Python SDK</TabsTrigger>
+            <TabsList className="flex-wrap">
+              <TabsTrigger value="python">Python</TabsTrigger>
+              <TabsTrigger value="python-httpx">Python httpx</TabsTrigger>
+              <TabsTrigger value="node">Node.js</TabsTrigger>
               <TabsTrigger value="webhook">Webhook Config</TabsTrigger>
               <TabsTrigger value="curl">cURL Ingest</TabsTrigger>
             </TabsList>
@@ -100,6 +124,31 @@ export default function IntegrationsPage() {
               <pre className="mt-2 overflow-x-auto rounded-lg bg-muted/50 p-4 font-mono text-sm">
                 <code>{pythonSnippet(hash)}</code>
               </pre>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Set HTTP_PROXY, HTTPS_PROXY, NO_PROXY, REQUESTS_CA_BUNDLE. Register policy, trace calls, verify.
+              </p>
+            </TabsContent>
+            <TabsContent value="python-httpx" className="mt-4">
+              <div className="flex justify-end">
+                <CopyButton text={pythonHttpxSnippet} />
+              </div>
+              <pre className="mt-2 overflow-x-auto rounded-lg bg-muted/50 p-4 font-mono text-sm">
+                <code>{pythonHttpxSnippet}</code>
+              </pre>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Import aegis_intercept before httpx to auto-trace all HTTP calls through the proxy.
+              </p>
+            </TabsContent>
+            <TabsContent value="node" className="mt-4">
+              <div className="flex justify-end">
+                <CopyButton text={nodeSnippet} />
+              </div>
+              <pre className="mt-2 overflow-x-auto rounded-lg bg-muted/50 p-4 font-mono text-sm">
+                <code>{nodeSnippet}</code>
+              </pre>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Set HTTP_PROXY, HTTPS_PROXY, NODE_EXTRA_CA_CERTS. Use aegis.trace for custom actions.
+              </p>
             </TabsContent>
             <TabsContent value="webhook" className="mt-4">
               <div className="flex justify-end">

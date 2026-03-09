@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useIncident } from "@/lib/api";
+import { useIncident, useReceipts } from "@/lib/api";
 import { sanitizeForDisplay } from "@/lib/sanitize";
 import { severityColor, ViolationSeverity } from "@/lib/severity";
 import { ArrowLeft, CheckCircle, Copy, Download, ShieldOff, AlertTriangle } from "lucide-react";
@@ -28,6 +28,18 @@ export default function IncidentDetailPage() {
   const incidentId = typeof params.id === "string" ? params.id : null;
 
   const { data: incident, isLoading, isError } = useIncident(incidentId);
+
+  const tsMs = incident?.timestamp_ns != null ? Number(incident.timestamp_ns) / 1e6 : 0;
+  const windowMs = 5 * 60 * 1000;
+  const since = tsMs ? new Date(tsMs - windowMs).toISOString() : null;
+  const until = tsMs ? new Date(tsMs + windowMs).toISOString() : null;
+
+  const { data: relatedReceipts } = useReceipts({
+    policyCommitment: incident?.policy_commitment ?? null,
+    since: since ?? null,
+    until: until ?? null,
+    enabled: !!incident?.policy_commitment,
+  });
 
   if (!incidentId) {
     return (
@@ -194,8 +206,48 @@ export default function IncidentDetailPage() {
             </span>
             <p className="mt-1 font-mono text-sm">{incident.timestamp_ns}</p>
           </div>
+          <div>
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Verify Chain
+            </span>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Run <code className="rounded bg-muted/50 px-1">make verify</code> or{" "}
+              <code className="rounded bg-muted/50 px-1">cargo run --manifest-path tools/aegis-verify/Cargo.toml -- ./data/proxy-trace.jsonl</code> to
+              verify BLAKE3 hash chain integrity of the proxy trace log.
+            </p>
+          </div>
         </CardContent>
       </Card>
+
+      {relatedReceipts && relatedReceipts.length > 0 && (
+        <Card className="mt-6">
+          <CardHeader>
+            <CardTitle className="text-base">Related Receipts</CardTitle>
+            <CardDescription>
+              Receipts with same policy commitment within ±5 min of incident
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {relatedReceipts.slice(0, 5).map((entry) => {
+                const receipt = entry.value as { receipt_id?: string; trace_hash?: string };
+                return (
+                  <div
+                    key={receipt.receipt_id ?? entry.received_at}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded border border-border/50 bg-muted/20 px-3 py-2 text-sm"
+                  >
+                    <span className="font-mono text-xs">{receipt.receipt_id?.slice(0, 24)}...</span>
+                    <span className="text-muted-foreground">{formatTime(entry.received_at)}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <Button asChild variant="outline" size="sm" className="mt-3">
+              <Link href="/dashboard/receipts">View all receipts</Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       <Card className="mt-6 border-amber-500/30 bg-amber-50/50 dark:border-amber-500/20 dark:bg-amber-950/20">
         <CardHeader>

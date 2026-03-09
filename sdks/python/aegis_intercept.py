@@ -27,7 +27,13 @@ _sdk_dir = os.path.dirname(os.path.abspath(__file__))
 if _sdk_dir not in sys.path:
     sys.path.insert(0, _sdk_dir)
 
-from aegis_sdk import Aegis
+from aegis_sdk import Aegis, configure_demo_env
+
+# Auto-configure proxy/CA when AEGIS_DEMO=1 or AEGIS_AUTO_CONFIG=1
+if os.environ.get("AEGIS_DEMO", "").strip() in ("1", "true", "yes") or os.environ.get(
+    "AEGIS_AUTO_CONFIG", ""
+).strip() in ("1", "true", "yes"):
+    configure_demo_env()
 
 # Global Aegis instance from AEGIS_BASE_URL env (default http://127.0.0.1:3000)
 _aegis_base_url = os.environ.get("AEGIS_BASE_URL", "http://127.0.0.1:3000")
@@ -52,6 +58,7 @@ def _build_http_trace_entry(
     status_code: Optional[int],
     elapsed_ms: float,
     error: Optional[str] = None,
+    parent_task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a trace entry for an HTTP call, matching Aegis schema."""
     return {
@@ -69,7 +76,7 @@ def _build_http_trace_entry(
         "reasoning_summary": None,
         "model_id": None,
         "instruction_hash": None,
-        "parent_task_id": None,
+        "parent_task_id": parent_task_id,
     }
 
 
@@ -109,6 +116,7 @@ def _patch_requests() -> None:
                     status_code,
                     elapsed_ms,
                     error_msg,
+                    getattr(aegis, "_parent_task_id", None),
                 )
                 aegis._append_trace(entry)
             except Exception:
@@ -148,6 +156,7 @@ def _patch_httpx() -> None:
                     status_code,
                     elapsed_ms,
                     error_msg,
+                    getattr(aegis, "_parent_task_id", None),
                 )
                 aegis._append_trace(entry)
             except Exception:
@@ -181,6 +190,7 @@ def _patch_httpx() -> None:
                     status_code,
                     elapsed_ms,
                     error_msg,
+                    getattr(aegis, "_parent_task_id", None),
                 )
                 aegis._append_trace(entry)
             except Exception:
@@ -226,6 +236,7 @@ def _patch_aiohttp() -> None:
                     status_code,
                     elapsed_ms,
                     error_msg,
+                    getattr(aegis, "_parent_task_id", None),
                 )
                 aegis._append_trace(entry)
             except Exception:

@@ -39,6 +39,7 @@ export interface PotReceipt {
   agent_id?: string;
   identity_hash?: string;
   combined_hash?: string;
+  parent_task_ids?: string[];
   timestamp_ns: number;
   signature: string;
   public_key: string;

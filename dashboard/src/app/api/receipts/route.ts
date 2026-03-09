@@ -161,9 +161,28 @@ export async function GET(request: NextRequest) {
 
   const orgId = session.org_id || "default";
   const parentTaskId = request.nextUrl.searchParams.get("parent_task_id");
-  const filtered = parentTaskId
+  const policyCommitment = request.nextUrl.searchParams.get("policy_commitment");
+  const sinceParam = request.nextUrl.searchParams.get("since");
+  const untilParam = request.nextUrl.searchParams.get("until");
+
+  let filtered = parentTaskId
     ? listReceiptsByParentTaskId(orgId, parentTaskId)
     : listReceiptsByOrg(orgId);
+
+  if (policyCommitment) {
+    filtered = filtered.filter((r) => {
+      const v = r.value as Record<string, unknown> | null;
+      return v?.policy_commitment === policyCommitment;
+    });
+  }
+  if (sinceParam || untilParam) {
+    const since = sinceParam ? new Date(sinceParam).getTime() : 0;
+    const until = untilParam ? new Date(untilParam).getTime() : Number.POSITIVE_INFINITY;
+    filtered = filtered.filter((r) => {
+      const t = new Date(r.received_at).getTime();
+      return t >= since && t <= until;
+    });
+  }
 
   const limit = Math.min(
     Math.max(1, Number.parseInt(request.nextUrl.searchParams.get("limit") ?? "50", 10) || 50),

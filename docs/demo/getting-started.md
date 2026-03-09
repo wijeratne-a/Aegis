@@ -2,10 +2,20 @@
 
 ## Prerequisites
 
+**Fresh clone:** Run `make setup` to create `policy.json` from `policy.json.example` and install dependencies.
+
 1. **Start infrastructure** (Docker Compose):
    ```bash
-   docker compose up -d verifier proxy web prometheus grafana
+   make demo
    ```
+   Alternatively, `./scripts/demo.sh` sets proxy/CA env vars and starts infra. Use `./scripts/demo.sh --run-agent` to run the Python demo after. On Windows: `.\scripts\demo.ps1`.
+   Or manually:
+   ```bash
+   docker compose up -d --wait verifier proxy web prometheus grafana
+   ```
+   `make demo` waits for verifier and proxy health checks, then prints:
+   - Dashboard: http://localhost:3001
+   - Demo: `cd sdks/python && python agent.py --demo`
 
 2. **Control Plane**: The `web` service in Docker is the dashboard (http://localhost:3001) and receives receipt webhooks. To run the dashboard locally with hot reload instead of the container:
    ```bash
@@ -16,6 +26,8 @@
    ```bash
    cd sdks/python && pip install -e .
    ```
+
+See [policy-quickstart.md](policy-quickstart.md) for where policy is defined and how dashboard, proxy, and agent relate.
 
 ## Quick Demo (Python)
 
@@ -101,6 +113,8 @@ export REQUESTS_CA_BUNDLE=./deploy/certs/ca.crt
 python examples/stress_test_agent.py
 ```
 
+**Mock mode** (avoids DNS errors for fake domains): Set `STRESS_TEST_USE_MOCK=1` to run a local mock server. The proxy must have `AEGIS_STRESS_MOCK_PORT=9999` (set in Docker by default). For full policy testing with real blocked/allowed hosts, use real endpoints.
+
 ## Developer Tools
 
 - **Debug Watch**: Tail proxy trace WAL in real time: `cargo run --manifest-path dev/cli/Cargo.toml -- debug watch`
@@ -110,7 +124,9 @@ When using Docker, the proxy writes the trace to `./data/proxy-trace.jsonl` on t
 
 ## Swarm / Multi-Agent Tracing
 
-When Agent A calls Agent B, pass `parent_task_id` in trace entries so you can query the swarm lineage. Set `parent_task_id` to the parent agent's task ID when appending trace entries. Then query `GET /api/receipts?parent_task_id=<task_id>` to see receipts from child agents that were called by that parent.
+When Agent A calls Agent B, pass `parent_task_id` in trace entries so you can query the swarm lineage. Set `parent_task_id` to the parent agent's receipt ID when appending trace entries. Then query `GET /api/receipts?parent_task_id=X` to see receipts from child agents that were called by that parent.
+
+**Swarm demo:** `python examples/swarm_demo.py` — Agent A calls Agent B over HTTP with `X-Aegis-Parent-Task-Id`; script asserts lineage. Dashboard Receipts page has a lineage filter and displays `parent_task_ids`.
 
 ## Webhook + Alerts
 

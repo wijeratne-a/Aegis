@@ -46,8 +46,34 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "format must be json or csv" }, { status: 400 });
   }
 
+  const rangeParam = request.nextUrl.searchParams.get("range") ?? "all";
+  const sinceParam = request.nextUrl.searchParams.get("since");
+  const untilParam = request.nextUrl.searchParams.get("until");
+
+  let since: Date | null = null;
+  let until: Date | null = null;
+  if (rangeParam === "24h") {
+    until = new Date();
+    since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  } else if (rangeParam === "7d") {
+    until = new Date();
+    since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  } else if (sinceParam || untilParam) {
+    if (sinceParam) since = new Date(sinceParam);
+    if (untilParam) until = new Date(untilParam);
+  }
+
   const orgId = session.org_id || "default";
-  const entries = listReceiptsByOrg(orgId);
+  let entries = listReceiptsByOrg(orgId);
+  if (since || until) {
+    entries = entries.filter((entry) => {
+      const t = new Date(entry.received_at).getTime();
+      if (since && t < since.getTime()) return false;
+      if (until && t > until.getTime()) return false;
+      return true;
+    });
+  }
+
   const rows = entries.map((entry) => {
     const receipt = (entry.value ?? {}) as Record<string, unknown>;
     return {

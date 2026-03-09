@@ -106,6 +106,26 @@ export async function POST(request: NextRequest) {
         { status: 502 }
       );
     }
+
+    // Optional: sync restricted_endpoints to proxy when AEGIS_PROXY_URL is set
+    const proxyUrl = process.env.AEGIS_PROXY_URL?.replace(/\/$/, "");
+    if (proxyUrl && parsed.data.public_values?.restricted_endpoints?.length) {
+      try {
+        const proxyRes = await fetch(`${proxyUrl}/policy`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            restricted_endpoints: parsed.data.public_values.restricted_endpoints,
+          }),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (!proxyRes.ok) {
+          console.warn("[api/register] proxy policy sync failed:", proxyRes.status);
+        }
+      } catch (proxyErr) {
+        console.warn("[api/register] proxy policy sync skipped:", proxyErr);
+      }
+    }
     const orgId = session.org_id || "default";
     const key = policyStorageKey(orgId, commitment);
     const anchor = await publishCommitment(commitment, {

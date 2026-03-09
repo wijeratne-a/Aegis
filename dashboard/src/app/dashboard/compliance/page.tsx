@@ -1,13 +1,24 @@
 "use client";
 
+import { useState } from "react";
 import { Download, History } from "lucide-react";
 import { useSession, usePolicyHistory } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
-function ExportButton({ format, label }: { format: "json" | "csv"; label: string }) {
-  const href = `/api/audit/export?format=${format}`;
+function ExportButton({
+  format,
+  label,
+  range,
+}: {
+  format: "json" | "csv";
+  label: string;
+  range: string;
+}) {
+  const params = new URLSearchParams({ format });
+  if (range !== "all") params.set("range", range);
+  const href = `/api/audit/export?${params}`;
   return (
     <a href={href} target="_blank" rel="noreferrer">
       <Button variant="outline" className="w-full justify-start sm:w-auto">
@@ -36,6 +47,7 @@ export default function CompliancePage() {
   const sessionQuery = useSession();
   const historyQuery = usePolicyHistory();
   const orgId = sessionQuery.data?.org_id ?? "default";
+  const [range, setRange] = useState<string>("all");
 
   return (
     <div className="space-y-6">
@@ -50,12 +62,28 @@ export default function CompliancePage() {
         <CardHeader>
           <CardTitle>Audit Export</CardTitle>
           <CardDescription>
-            Current scope: <code className="font-mono">{orgId}</code>
+            Current scope: <code className="font-mono">{orgId}</code>. Fields: received_at, receipt_id,
+            policy_commitment, trace_hash, timestamp_ns. Compatible with common SIEM ingestion patterns.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-3 sm:flex-row">
-          <ExportButton format="json" label="Download JSON export" />
-          <ExportButton format="csv" label="Download CSV export" />
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-muted-foreground">Date range:</span>
+            <select
+              value={range}
+              onChange={(e) => setRange(e.target.value)}
+              className="rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="all">All</option>
+              <option value="24h">Last 24h</option>
+              <option value="7d">Last 7d</option>
+            </select>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <ExportButton format="json" label="Download JSON export" range={range} />
+            <ExportButton format="csv" label="Download CSV export" range={range} />
+            <ExportButton format="csv" label="Export for SIEM" range={range} />
+          </div>
         </CardContent>
       </Card>
 

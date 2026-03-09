@@ -139,11 +139,64 @@ fn sanitize_header_value(s: &str) -> bool {
     !s.bytes().any(|b| b < 0x20 || b == 0x7f)
 }
 
-/// When AEGIS_DEMO_EVIL_PORT is set (e.g. "19999"), allow 127.0.0.1:{port} for local injection demo.
+/// Returns true if remote_addr is allowed to access policy management endpoints (GET/POST /policy).
+fn is_policy_management_allowed(remote_addr: &SocketAddr) -> bool {
+    if remote_addr.ip().is_loopback() {
+        return true;
+    }
+    if std::env::var("POLICY_MANAGEMENT_FROM_DASHBOARD")
+        .map(|v| v.trim().eq_ignore_ascii_case("1") || v.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        if let IpAddr::V4(v4) = remote_addr.ip() {
+            return v4.is_private();
+        }
+    }
+    if let Ok(networks) = std::env::var("POLICY_MANAGEMENT_ALLOW_NETWORKS") {
+        let ip = remote_addr.ip();
+        for cidr in networks.split(',') {
+            let cidr = cidr.trim();
+            if cidr.is_empty() {
+                continue;
+            }
+            if cidr_contains(cidr, ip) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn cidr_contains(cidr: &str, ip: IpAddr) -> bool {
+    let Some((addr_str, prefix)) = cidr.split_once('/') else {
+        return false;
+    };
+    let prefix: u8 = match prefix.parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let cidr_ip: IpAddr = match addr_str.trim().parse() {
+        Ok(i) => i,
+        Err(_) => return false,
+    };
+    match (cidr_ip, ip) {
+        (IpAddr::V4(c), IpAddr::V4(i)) => {
+            let mask = !0u32 << (32 - prefix.min(32));
+            (u32::from_be_bytes(c.octets()) & mask) == (u32::from_be_bytes(i.octets()) & mask)
+        }
+        (IpAddr::V6(_), IpAddr::V6(_)) => false,
+        _ => false,
+    }
+}
+
+/// When AEGIS_DEMO_EVIL_PORT or AEGIS_STRESS_MOCK_PORT is set, allow 127.0.0.1:{port} for local demo/mock.
 fn is_demo_evil_host_allowed(authority: &str) -> bool {
-    if let Ok(port) = std::env::var("AEGIS_DEMO_EVIL_PORT") {
-        if !port.is_empty() && authority == format!("127.0.0.1:{}", port) {
-            return true;
+    for env_key in ["AEGIS_DEMO_EVIL_PORT", "AEGIS_STRESS_MOCK_PORT"] {
+        if let Ok(port) = std::env::var(env_key) {
+            let port = port.trim();
+            if !port.is_empty() && authority == format!("127.0.0.1:{}", port) {
+                return true;
+            }
         }
     }
     false
@@ -178,11 +231,14 @@ async fn host_resolves_to_unsafe_ip(host_or_authority: &str) -> Result<bool> {
         .next()
         .unwrap_or(host_or_authority)
         .trim();
-    // Demo bypass: when AEGIS_DEMO_EVIL_PORT is set, allow 127.0.0.1 for local evil server
+    // Demo bypass: when AEGIS_DEMO_EVIL_PORT or AEGIS_STRESS_MOCK_PORT is set, allow 127.0.0.1 for local demo/mock
     if host == "127.0.0.1"
-        && std::env::var("AEGIS_DEMO_EVIL_PORT")
-            .map(|p| !p.is_empty())
+        && (std::env::var("AEGIS_DEMO_EVIL_PORT")
+            .map(|p| !p.trim().is_empty())
             .unwrap_or(false)
+            || std::env::var("AEGIS_STRESS_MOCK_PORT")
+                .map(|p| !p.trim().is_empty())
+                .unwrap_or(false))
     {
         return Ok(false);
     }
@@ -669,7 +725,7 @@ pub async fn handle(
                     }));
             }
         }
-        if path == "/policy/current" && remote_addr.ip().is_loopback() {
+        if path == "/policy/current" && is_policy_management_allowed(&remote_addr) {
             let live = match state.live_policy.read() {
                 Ok(guard) => guard,
                 Err(e) => {
@@ -688,11 +744,18 @@ pub async fn handle(
             });
             return Ok(response_with(StatusCode::OK, &body.to_string()));
         }
+        if path == "/policy" && is_policy_management_allowed(&remote_addr) {
+            return handle_policy_get(state).await;
+        }
+    }
+
+    if method == Method::POST && req.uri().path() == "/policy" && is_policy_management_allowed(&remote_addr) {
+        return handle_policy_post(state, req).await;
     }
 
     if method == Method::POST
         && req.uri().path() == "/policy/reload"
-        && remote_addr.ip().is_loopback()
+        && is_policy_management_allowed(&remote_addr)
     {
         return handle_policy_reload(state).await;
     }
@@ -780,7 +843,16 @@ pub async fn handle(
     let target_host = target_uri.host().unwrap_or_default().to_string();
     let _latency_guard = RequestLatencyGuard::new();
     telemetry::increment_request(&target_host);
-    let blocked = should_block(&target_host, &state.config.policy);
+    let blocked = {
+        let policy = match state.live_policy.read() {
+            Ok(guard) => guard.config.clone(),
+            Err(e) => {
+                error!("RwLock poisoned for live_policy: {}", e);
+                state.config.policy.clone()
+            }
+        };
+        should_block(&target_host, &policy)
+    };
     let enforce_mode = if state
         .degraded_mode
         .load(std::sync::atomic::Ordering::Relaxed)
@@ -1036,6 +1108,60 @@ pub async fn handle(
         "proxied request"
     );
     Ok(resp)
+}
+
+async fn handle_policy_get(state: ProxyState) -> Result<Response<ProxyBody>> {
+    let live = match state.live_policy.read() {
+        Ok(guard) => guard,
+        Err(e) => {
+            error!("RwLock poisoned for live_policy: {}", e);
+            return Ok(response_with(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"policy state unavailable"}"#,
+            ));
+        }
+    };
+    let body = serde_json::to_string(&live.config).unwrap_or_else(|_| r#"{"restricted_endpoints":[]}"#.to_string());
+    Ok(response_with(StatusCode::OK, &body))
+}
+
+#[derive(Debug, Deserialize)]
+struct PolicyUpdateBody {
+    #[serde(default)]
+    restricted_endpoints: Option<Vec<String>>,
+}
+
+async fn handle_policy_post(state: ProxyState, mut req: Request<Incoming>) -> Result<Response<ProxyBody>> {
+    let body = req.body_mut();
+    let bytes = body
+        .collect()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read body: {}", e))?
+        .to_bytes();
+    let update: PolicyUpdateBody = match serde_json::from_slice(&bytes) {
+        Ok(u) => u,
+        Err(e) => {
+            return Ok(response_with(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"invalid JSON: {}"}}"#, e),
+            ));
+        }
+    };
+    if let Some(restricted) = update.restricted_endpoints {
+        let mut live = match state.live_policy.write() {
+            Ok(guard) => guard,
+            Err(e) => {
+                error!("RwLock poisoned for live_policy: {}", e);
+                return Ok(response_with(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    r#"{"error":"policy update failed"}"#,
+                ));
+            }
+        };
+        live.config.restricted_endpoints = restricted;
+        info!("policy updated via API (restricted_endpoints)");
+    }
+    Ok(response_with(StatusCode::OK, r#"{"status":"ok"}"#))
 }
 
 async fn handle_policy_reload(state: ProxyState) -> Result<Response<ProxyBody>> {

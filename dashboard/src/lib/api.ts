@@ -33,13 +33,27 @@ export function useRegisterPolicy() {
 
 type ReceiptListResponse = {
   receipts: Array<{ received_at: string; value: PotReceipt }>;
+  total?: number;
+  nextOffset?: number;
 };
 
-export function useReceipts() {
+export function useReceipts(options?: {
+  parentTaskId?: string | null;
+  policyCommitment?: string | null;
+  since?: string | null;
+  until?: string | null;
+  enabled?: boolean;
+}) {
   return useQuery({
-    queryKey: ["receipts"],
+    queryKey: ["receipts", options?.parentTaskId ?? "all", options?.policyCommitment ?? "", options?.since ?? "", options?.until ?? ""],
+    enabled: options?.enabled !== false,
     queryFn: async () => {
-      const res = await fetch("/api/receipts", { credentials: "include" });
+      const params = new URLSearchParams();
+      if (options?.parentTaskId) params.set("parent_task_id", options.parentTaskId);
+      if (options?.policyCommitment) params.set("policy_commitment", options.policyCommitment);
+      if (options?.since) params.set("since", options.since);
+      if (options?.until) params.set("until", options.until);
+      const res = await fetch(`/api/receipts?${params}`, { credentials: "include" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error ?? `HTTP ${res.status}`);

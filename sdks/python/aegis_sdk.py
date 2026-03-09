@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
+import sys
+import tempfile
 import threading
 import time
+import uuid
 import atexit
 import signal
-import os
 from pathlib import Path
 from dataclasses import dataclass
 from functools import wraps
@@ -51,6 +54,30 @@ class VerifyRequestModel(BaseModel):
     public_values: PublicValuesModel
     identity_context: Optional[Dict[str, Optional[str]]] = None
     task_token: Optional[str] = None
+
+
+_DEFAULT_PROXY = "http://127.0.0.1:8080"
+_DEFAULT_CA_BUNDLE = "/etc/aegis/ca.crt"
+
+
+def configure_demo_env() -> None:
+    """Set HTTP_PROXY, HTTPS_PROXY, NO_PROXY, REQUESTS_CA_BUNDLE for demo mode.
+    Call when AEGIS_DEMO=1 or AEGIS_AUTO_CONFIG=1. Safe to call multiple times."""
+    os.environ.setdefault("HTTP_PROXY", _DEFAULT_PROXY)
+    os.environ.setdefault("HTTPS_PROXY", _DEFAULT_PROXY)
+    no_proxy = os.environ.get("NO_PROXY", "") or os.environ.get("no_proxy", "")
+    if "127.0.0.1" not in no_proxy and "localhost" not in no_proxy:
+        os.environ["NO_PROXY"] = "127.0.0.1,localhost" + (f",{no_proxy}" if no_proxy else "")
+    if "REQUESTS_CA_BUNDLE" not in os.environ and "SSL_CERT_FILE" not in os.environ:
+        root = Path(__file__).resolve().parent.parent
+        if os.environ.get("AEGIS_PROJECT_ROOT"):
+            root = Path(os.environ["AEGIS_PROJECT_ROOT"])
+        deploy_ca = root / "deploy" / "certs" / "ca.crt"
+        if deploy_ca.exists():
+            os.environ["REQUESTS_CA_BUNDLE"] = str(deploy_ca)
+            os.environ["SSL_CERT_FILE"] = str(deploy_ca)
+        else:
+            os.environ.setdefault("REQUESTS_CA_BUNDLE", _DEFAULT_CA_BUNDLE)
 
 
 @dataclass
@@ -124,6 +151,12 @@ class Aegis:
             "iam_role": iam_role,
         }
         self.model_id = model_id
+        self._parent_task_id: Optional[str] = None
+
+        if os.environ.get("AEGIS_DEMO", "").strip() in ("1", "true", "yes") or os.environ.get(
+            "AEGIS_AUTO_CONFIG", ""
+        ).strip() in ("1", "true", "yes"):
+            configure_demo_env()
 
         self._trace_queue: "queue.Queue[None]" = queue.Queue()
         self._result_queue: "queue.Queue[AegisResult]" = queue.Queue()
@@ -261,15 +294,34 @@ class Aegis:
 
     def _persist_wal_locked(self) -> None:
         self.wal_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self.wal_path.with_suffix(".tmp")
         serialized = "\n".join(json.dumps(item) for item in self._pending_entries)
         if serialized:
             serialized += "\n"
-        with open(temp_path, "w", encoding="utf-8") as f:
-            f.write(serialized)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temp_path, self.wal_path)
+        # On Windows, os.replace next to wal_path can fail when file is locked.
+        # Write to temp dir first, then replace; retry with backoff on failure.
+        temp_dir = Path(tempfile.gettempdir())
+        temp_name = f"aegis-wal-{uuid.uuid4().hex}.tmp"
+        temp_path = temp_dir / temp_name
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(serialized)
+                f.flush()
+                os.fsync(f.fileno())
+            for attempt in range(5):
+                try:
+                    os.replace(temp_path, self.wal_path)
+                    return
+                except OSError as e:
+                    if attempt < 4 and (sys.platform == "win32" or "Permission denied" in str(e)):
+                        time.sleep(0.05 * (attempt + 1))
+                    else:
+                        raise
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
 
     def _flush_pending(self, force: bool) -> None:
         if not self.policy_commitment:
@@ -360,7 +412,7 @@ class Aegis:
             "reasoning_summary": reasoning_summary,
             "model_id": self.model_id,
             "instruction_hash": None,
-            "parent_task_id": None,
+            "parent_task_id": self._parent_task_id,
         }
 
 

@@ -1,6 +1,7 @@
 .PHONY: setup test lint clean demo build debug verify
 
 setup:
+	@if [ ! -f policy.json ]; then cp policy.json.example policy.json && echo "Created policy.json from policy.json.example"; fi
 	docker compose build
 	cd sdks/python && pip install -e .
 	cd sdks/nodejs && npm install
@@ -28,8 +29,11 @@ lint:
 	cd dashboard && npm run lint
 
 demo:
-	docker compose up -d verifier proxy web prometheus grafana
-	@echo "See docs/demo/getting-started.md"
+	@if [ ! -f policy.json ]; then cp policy.json.example policy.json && echo "Created policy.json from policy.json.example"; fi
+	docker compose up -d --wait verifier proxy web prometheus grafana
+	@echo ""
+	@echo "Dashboard: http://localhost:3001 | Demo: cd sdks/python && python agent.py --demo"
+	@echo "Set AEGIS_DEMO=1 for auto proxy/CA config. See docs/demo/getting-started.md"
 
 debug:
 	cargo run --manifest-path dev/cli/Cargo.toml -- debug watch

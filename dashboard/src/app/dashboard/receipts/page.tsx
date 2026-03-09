@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useReceipts, useSession } from "@/lib/api";
 import { getHumanContext, formatAgentIdFallback } from "@/lib/demo-identity-labels";
@@ -149,6 +150,21 @@ function PotReceiptCard({
             <pre className="mt-1 break-all rounded bg-muted/50 p-2">{sanitizeForDisplay(proof.identity_hash)}</pre>
           </div>
         )}
+        {proof.parent_task_ids && proof.parent_task_ids.length > 0 && (
+          <div className="rounded border border-amber-500/30 bg-amber-50/50 p-3 dark:border-amber-500/20 dark:bg-amber-950/20">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Lineage (parent_task_ids)
+            </span>
+            <p className="mt-1 text-xs text-muted-foreground">Child of these parent task(s)</p>
+            <div className="mt-2 space-y-1">
+              {proof.parent_task_ids.map((pid) => (
+                <pre key={pid} className="break-all rounded bg-muted/50 p-2 text-xs">
+                  {sanitizeForDisplay(pid)}
+                </pre>
+              ))}
+            </div>
+          </div>
+        )}
         {proof.combined_hash && (
           <div>
             <span className="text-muted-foreground">combined_hash:</span>
@@ -176,7 +192,9 @@ function PotReceiptCard({
 }
 
 export default function ReceiptsPage() {
-  const receiptsQuery = useReceipts();
+  const [lineageFilter, setLineageFilter] = useState("");
+  const parentTaskId = lineageFilter.trim() || undefined;
+  const receiptsQuery = useReceipts(parentTaskId ? { parentTaskId } : undefined);
   const sessionQuery = useSession();
   const isAdmin = sessionQuery.data?.role === "admin";
   const [showRaw, setShowRaw] = useState(false);
@@ -198,6 +216,26 @@ export default function ReceiptsPage() {
             onClick={() => setShowRaw((prev) => !prev)}
           >
             {showRaw ? "Mask PII" : "Show raw"}
+          </Button>
+        )}
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-2">
+          <label htmlFor="lineage-filter" className="text-sm text-muted-foreground">
+            Lineage (parent_task_id):
+          </label>
+          <Input
+            id="lineage-filter"
+            placeholder="Filter by parent task ID"
+            value={lineageFilter}
+            onChange={(e) => setLineageFilter(e.target.value)}
+            className="max-w-xs font-mono text-sm"
+          />
+        </div>
+        {parentTaskId && (
+          <Button variant="ghost" size="sm" onClick={() => setLineageFilter("")}>
+            Clear filter
           </Button>
         )}
       </div>

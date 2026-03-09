@@ -1,18 +1,18 @@
 {
   "id": null,
   "uid": "aegis-violations",
-  "title": "Aegis Policy Violations",
-  "tags": ["aegis", "security", "demo"],
+  "title": "Aegis CISO Overview",
+  "tags": ["aegis", "security", "demo", "ciso"],
   "timezone": "browser",
   "schemaVersion": 38,
-  "version": 1,
+  "version": 2,
   "refresh": "10s",
   "panels": [
     {
       "id": 1,
       "type": "stat",
       "title": "Policy Violations (Blocked)",
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
       "targets": [
         {
           "refId": "A",
@@ -29,11 +29,39 @@
       "id": 2,
       "type": "stat",
       "title": "Requests Allowed",
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
       "targets": [
         {
           "refId": "A",
           "expr": "aegis_proxy_requests_total - aegis_proxy_blocked_total",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Timeouts",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "aegis_proxy_timeout_total",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Policy Eval p95 (ms)",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "aegis_proxy_policy_eval_p95_ms",
           "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ],
@@ -49,6 +77,20 @@
           "refId": "A",
           "expr": "increase(aegis_proxy_blocked_total[5m])",
           "legendFormat": "Violations (5m)",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Requests Over Time",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(aegis_proxy_requests_total[5m])",
+          "legendFormat": "Requests (5m)",
           "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ]

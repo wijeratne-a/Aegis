@@ -4,14 +4,20 @@ Stress test agent for Aegis Proof-of-Task tracing.
 
 Uses aegis_intercept to auto-trace HTTP calls. Run with proxy and verifier:
   HTTP_PROXY=http://127.0.0.1:8080 HTTPS_PROXY=... REQUESTS_CA_BUNDLE=... python stress_test_agent.py
+
+With STRESS_TEST_USE_MOCK=1: runs a local mock server (port 9999) to avoid DNS errors.
+  Set AEGIS_STRESS_MOCK_PORT=9999 in proxy env for Docker. For full policy testing use real URLs.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 # Add sdks/python to path before any HTTP client imports
@@ -30,6 +36,8 @@ import httpx
 TASK_COUNTS = {"llm": 20, "transfer": 10, "db_attack": 5, "mixed": 65}
 TOTAL_TASKS = sum(TASK_COUNTS.values())
 
+MOCK_PORT = int(os.environ.get("STRESS_MOCK_PORT", "9999"))
+
 # Endpoints - db_attack and admin hit restricted hosts (blocked by policy)
 ENDPOINTS = {
     "llm": "https://api.openai.com/v1/chat/completions",
@@ -39,12 +47,39 @@ ENDPOINTS = {
     "allowed": "https://httpbin.org/get",
 }
 
+# Mock mode: all requests go to local HTTP mock server (avoids DNS errors)
+MOCK_ENDPOINTS = {
+    "llm": f"http://127.0.0.1:{MOCK_PORT}/llm",
+    "transfer": f"http://127.0.0.1:{MOCK_PORT}/transfer",
+    "db_attack": f"http://127.0.0.1:{MOCK_PORT}/db_attack",
+    "admin": f"http://127.0.0.1:{MOCK_PORT}/admin",
+    "allowed": f"http://127.0.0.1:{MOCK_PORT}/allowed",
+}
 
-async def run_task(client: httpx.AsyncClient, task_type: str) -> dict:
+
+def _start_mock_server(port: int) -> HTTPServer:
+    """Start a minimal HTTP mock server that returns 200 JSON for all paths."""
+
+    class MockHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True, "path": self.path}).encode())
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", port), MockHandler)
+    return server
+
+
+async def run_task(client: httpx.AsyncClient, task_type: str, use_mock: bool) -> dict:
     """Run a single HTTP task. Returns {allowed, blocked, error, body}."""
     if task_type == "mixed":
         task_type = random.choice(["llm", "transfer", "allowed", "db_attack", "admin"])
-    url = ENDPOINTS.get(task_type, ENDPOINTS["allowed"])
+    endpoints = MOCK_ENDPOINTS if use_mock else ENDPOINTS
+    url = endpoints.get(task_type, endpoints["allowed"])
     try:
         resp = await client.get(url, timeout=10.0)
         resp.raise_for_status()
@@ -117,10 +152,19 @@ async def run_stress_test() -> dict:
 
 
 def main() -> None:
-    print("Aegis Stress Test - 100 concurrent tasks")
+    use_mock = os.environ.get("STRESS_TEST_USE_MOCK", "").strip() in ("1", "true", "yes")
+    if use_mock:
+        print("Aegis Stress Test (mock mode) - 100 concurrent tasks")
+        print("  Mock server on 127.0.0.1:9999 (set AEGIS_STRESS_MOCK_PORT=9999 in proxy)")
+    else:
+        print("Aegis Stress Test - 100 concurrent tasks")
     print("  Mix: 20 LLM, 10 transfer, 5 db_attack (blocked), 65 mixed")
     print()
-    results = asyncio.run(run_stress_test())
+    if use_mock:
+        server = _start_mock_server(MOCK_PORT)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+    results = asyncio.run(run_stress_test(use_mock=use_mock))
     print("Results:")
     print(f"  Allowed:        {results['allowed']}")
     print(f"  Blocked:        {results['blocked']}")

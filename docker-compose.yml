@@ -28,6 +28,8 @@ services:
       SEMANTIC_DENY: "true"
       METRICS_ENABLED: "true"
       AEGIS_DEMO_EVIL_PORT: "19999"
+      AEGIS_STRESS_MOCK_PORT: "9999"
+      POLICY_MANAGEMENT_FROM_DASHBOARD: "1"
       AEGIS_CA_PATH: /app/ca/ca.crt
     volumes:
       - ./deploy/certs:/app/ca
@@ -53,6 +55,7 @@ services:
       NEXT_PUBLIC_VERIFIER_URL: http://localhost:3000
       NEXT_PUBLIC_PROXY_URL: http://localhost:8080
       NEXT_PUBLIC_API_URL: http://localhost:3000
+      AEGIS_PROXY_URL: http://proxy:8080
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-demo-webhook-secret-min-32-characters-long}
     depends_on:
       - verifier
