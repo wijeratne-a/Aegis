@@ -104,7 +104,7 @@ async def run_task(client: httpx.AsyncClient, task_type: str, use_mock: bool) ->
         return {"allowed": False, "blocked": False, "error": str(e), "body": {}}
 
 
-async def run_stress_test() -> dict:
+async def run_stress_test(use_mock: bool = False) -> dict:
     """Run 100 concurrent tasks and return aggregated results."""
     catenar = get_catenar()
     policy = {
@@ -123,7 +123,7 @@ async def run_stress_test() -> dict:
     async with httpx.AsyncClient() as client:
         for task_type, count in TASK_COUNTS.items():
             for _ in range(count):
-                tasks.append((task_type, asyncio.create_task(run_task(client, task_type))))
+                tasks.append((task_type, asyncio.create_task(run_task(client, task_type, use_mock))))
 
         results = []
         for task_type, task in tasks:
