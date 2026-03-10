@@ -116,7 +116,9 @@ def main() -> None:
         server.shutdown()
         sys.exit(1)
 
-    # Agent A calls Agent B with parent_task_id
+    # Agent A calls Agent B with parent_task_id.
+    # With catenar_intercept: use catenar.set_parent_task_id(receipt_id_a) so
+    # X-Catenar-Caller and X-Catenar-Trace are injected automatically.
     proxy = os.environ.get("HTTP_PROXY", "http://127.0.0.1:8080")
     resp = requests.get(
         f"http://127.0.0.1:{AGENT_B_PORT}/",

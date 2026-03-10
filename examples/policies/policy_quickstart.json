@@ -1,0 +1,7 @@
+{
+  "restricted_endpoints": [
+    "database.internal",
+    "admin.company.com",
+    "db.internal"
+  ]
+}

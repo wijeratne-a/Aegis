@@ -2,6 +2,16 @@
 
 This directory contains sample policy configurations for Catenar.
 
+## policy_quickstart.json
+
+Reference config for common blocked hosts. Copy to repo root as policy.json:
+
+```bash
+cp policy_quickstart.json ../../policy.json
+```
+
+See [docs/demo/policy-quickstart.md](../../docs/demo/policy-quickstart.md).
+
 ## default.json
 
 A minimal policy template that mirrors [policy.json.example](../../policy.json.example) at the repo root. The proxy reads policy via `POLICY_PATH` (default: `policy.json` at repo root).

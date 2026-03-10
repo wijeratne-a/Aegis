@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-**Fresh clone:** Run `make setup` to create `policy.json` from `policy.json.example` and install dependencies.
+**First-time setup:** Run `make setup` or `cp policy.json.example policy.json` before `docker compose up`. The proxy requires policy.json (or uses empty policy if missing).
 
 1. **Start infrastructure** (Docker Compose):
    ```bash
@@ -27,6 +27,8 @@
    cd sdks/python && pip install -e .
    ```
 
+4. **CA Trust:** After the proxy starts, it writes the Root CA to `deploy/certs/ca.crt`. Set `REQUESTS_CA_BUNDLE=./deploy/certs/ca.crt` (Python) or `NODE_EXTRA_CA_CERTS=./deploy/certs/ca.crt` (Node) for HTTPS through the proxy. Or set `CATENAR_DEMO=1` before running agents to auto-configure.
+
 See [policy-quickstart.md](policy-quickstart.md) for where policy is defined and how dashboard, proxy, and agent relate.
 
 ## Quick Demo (Python)
@@ -37,6 +39,13 @@ python agent.py --demo
 ```
 
 Runs a scripted three-phase enterprise demo with colored output.
+
+## Bring Your Own Agent
+
+Minimal 2-line integration for existing agents (LangChain, CrewAI, raw Python):
+
+- **[examples/bring_your_own_agent.py](../../examples/bring_your_own_agent.py)** — Import `catenar_intercept` first, then `get_catenar().init(...)`. Your requests/httpx calls are auto-traced.
+- Set `CATENAR_DEMO=1` for minimal env setup (auto proxy + CA config).
 
 ## Manual Python Demo
 

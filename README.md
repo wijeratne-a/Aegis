@@ -34,6 +34,9 @@ flowchart TB
 ## Quick Start
 
 ```bash
+# First run: create policy.json (or run make setup)
+cp policy.json.example policy.json
+
 # Start infrastructure
 docker compose up -d verifier proxy web prometheus grafana
 
@@ -41,6 +44,14 @@ docker compose up -d verifier proxy web prometheus grafana
 # Proxy:   http://localhost:8080
 # Dashboard: http://localhost:3001
 # Grafana:  http://localhost:3002 (admin/admin)
+```
+
+**Python agents:** After the proxy starts, it writes the CA to `deploy/certs/ca.crt`. Set `CATENAR_DEMO=1` before running your agent for auto proxy/CA config, or manually:
+
+```bash
+export HTTP_PROXY=http://127.0.0.1:8080 HTTPS_PROXY=http://127.0.0.1:8080
+export NO_PROXY=127.0.0.1,localhost
+export REQUESTS_CA_BUNDLE=./deploy/certs/ca.crt
 ```
 
 See [docs/demo/getting-started.md](docs/demo/getting-started.md) for full demo instructions.
@@ -56,6 +67,16 @@ See [docs/demo/getting-started.md](docs/demo/getting-started.md) for full demo i
 | Node.js SDK | [sdks/nodejs](sdks/nodejs) | Catenar Proof-of-Task SDK for Node.js |
 | Dashboard | [dashboard](dashboard) | Next.js control plane UI |
 
+## Policy: JSON-Only (No Rego)
+
+Block hosts with `restricted_endpoints` in [policy.json](policy.json.example). No Rego required for basic endpoint blocking:
+
+```json
+{"restricted_endpoints": ["database.internal", "admin.company.com"]}
+```
+
+Rego ([policies/payload.rego](policies/payload.rego)) is optional for advanced rules: SSN detection, A2A trace headers, content inspection.
+
 ## Developer Tools
 
 | Tool | Command | Description |
@@ -65,6 +86,7 @@ See [docs/demo/getting-started.md](docs/demo/getting-started.md) for full demo i
 
 ## Examples
 
+- **[examples/bring_your_own_agent.py](examples/bring_your_own_agent.py)**: Minimal BYOA — import `catenar_intercept` first, `init()` policy, then use requests/httpx as usual. See [docs/demo/getting-started.md](docs/demo/getting-started.md#bring-your-own-agent).
 - **[examples/stress_test_agent.py](examples/stress_test_agent.py)**: Stress test with 100+ concurrent HTTP calls. Uses `catenar_intercept` for zero-config tracing. Run with proxy and verifier: `HTTP_PROXY=http://127.0.0.1:8080 python examples/stress_test_agent.py`
 
 ## Open Core

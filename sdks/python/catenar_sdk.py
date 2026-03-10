@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 import os
 import queue
 import sys
@@ -77,7 +78,13 @@ def configure_demo_env() -> None:
             os.environ["REQUESTS_CA_BUNDLE"] = str(deploy_ca)
             os.environ["SSL_CERT_FILE"] = str(deploy_ca)
         else:
-            os.environ.setdefault("REQUESTS_CA_BUNDLE", _DEFAULT_CA_BUNDLE)
+            warnings.warn(
+                "Proxy CA not found at deploy/certs/ca.crt. Start proxy first "
+                "(docker compose up -d proxy), or fetch manually: "
+                "curl http://127.0.0.1:8080/ca -o deploy/certs/ca.crt",
+                UserWarning,
+                stacklevel=2,
+            )
 
 
 @dataclass
@@ -183,6 +190,11 @@ class Catenar:
         self.version = version
         self.public_values = public_values
         return self.policy_commitment
+
+    def set_parent_task_id(self, receipt_id: Optional[str]) -> None:
+        """Set parent receipt ID for A2A calls. When set, outbound HTTP requests
+        will include X-Catenar-Caller and X-Catenar-Trace headers for swarm lineage."""
+        self._parent_task_id = receipt_id
 
     def with_reasoning(self, reasoning: str) -> "Catenar":
         """

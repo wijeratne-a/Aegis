@@ -80,6 +80,16 @@ def _build_http_trace_entry(
     }
 
 
+def _merge_a2a_headers(catenar: Catenar, headers: Any) -> Dict[str, str]:
+    """Merge X-Catenar-Caller and X-Catenar-Trace when parent_task_id is set."""
+    parent = getattr(catenar, "_parent_task_id", None)
+    if not parent:
+        return dict(headers) if headers and hasattr(headers, "items") else {}
+    agent_id = str(getattr(catenar, "agent_id", None) or "unknown")
+    base = dict(headers) if headers and hasattr(headers, "items") else {}
+    return {**base, "X-Catenar-Caller": agent_id, "X-Catenar-Trace": parent}
+
+
 def _patch_requests() -> None:
     """Patch requests.Session.request."""
     try:
@@ -96,6 +106,12 @@ def _patch_requests() -> None:
         *args: Any,
         **kwargs: Any,
     ) -> Any:
+        catenar = _get_catenar()
+        parent = getattr(catenar, "_parent_task_id", None)
+        if parent:
+            headers = kwargs.get("headers") or {}
+            merged = _merge_a2a_headers(catenar, headers)
+            kwargs["headers"] = merged
         start = time.perf_counter()
         status_code: Optional[int] = None
         error_msg: Optional[str] = None
@@ -136,6 +152,20 @@ def _patch_httpx() -> None:
     _original_client_send = httpx.Client.send
 
     def _patched_client_send(self: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
+        catenar = _get_catenar()
+        parent = getattr(catenar, "_parent_task_id", None)
+        if parent:
+            new_headers = dict(request.headers)
+            new_headers["X-Catenar-Caller"] = str(
+                getattr(catenar, "agent_id", None) or "unknown"
+            )
+            new_headers["X-Catenar-Trace"] = parent
+            request = httpx.Request(
+                request.method,
+                request.url,
+                headers=new_headers,
+                content=request.content,
+            )
         start = time.perf_counter()
         status_code: Optional[int] = None
         error_msg: Optional[str] = None
@@ -170,6 +200,20 @@ def _patch_httpx() -> None:
     async def _patched_async_send(
         self: Any, request: Any, *args: Any, **kwargs: Any
     ) -> Any:
+        catenar = _get_catenar()
+        parent = getattr(catenar, "_parent_task_id", None)
+        if parent:
+            new_headers = dict(request.headers)
+            new_headers["X-Catenar-Caller"] = str(
+                getattr(catenar, "agent_id", None) or "unknown"
+            )
+            new_headers["X-Catenar-Trace"] = parent
+            request = httpx.Request(
+                request.method,
+                request.url,
+                headers=new_headers,
+                content=request.content,
+            )
         start = time.perf_counter()
         status_code: Optional[int] = None
         error_msg: Optional[str] = None
@@ -215,6 +259,12 @@ def _patch_aiohttp() -> None:
         *args: Any,
         **kwargs: Any,
     ) -> Any:
+        catenar = _get_catenar()
+        parent = getattr(catenar, "_parent_task_id", None)
+        if parent:
+            headers = kwargs.get("headers") or {}
+            merged = _merge_a2a_headers(catenar, headers)
+            kwargs["headers"] = merged
         start = time.perf_counter()
         status_code: Optional[int] = None
         error_msg: Optional[str] = None
