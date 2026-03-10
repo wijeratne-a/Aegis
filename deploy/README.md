@@ -8,11 +8,6 @@ The base Helm chart at `helm/catenar/` deploys the Catenar proxy and verifier wi
 - **Proxy**: TLS MITM, Rego policy evaluation, BLAKE3 trace chaining
 - **Observability**: Prometheus metrics, OTLP export (when configured)
 
-## Enterprise Chart
+## Catenar Enterprise
 
-The `helm/enterprise/` chart adds Enterprise-only resources:
-
-- **Redis**: Distributed rate limiting and state (when `redis.enabled=true`)
-- **SIEM Integrations**: Datadog, Splunk HEC configmaps (when `integrations.*.enabled=true`)
-
-For AWS KMS, HashiCorp Vault signing, and full SIEM pipelines, use **Catenar Enterprise**.
+For Redis, SIEM integrations (Datadog, Splunk), and AWS KMS or HashiCorp Vault signing, see **Catenar Enterprise**. Contact for licensing.
