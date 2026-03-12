@@ -1,5 +1,18 @@
 # Catenar Trust Model
 
+## Trace WAL and Checkpoint Integrity
+
+The proxy writes a BLAKE3 hash chain to the trace WAL (`proxy-trace.jsonl`). A checkpoint file (`{wal}.chain_checkpoint`) stores the last chain hash for fast startup.
+
+**Trust requirement:** The WAL directory and checkpoint file must be **integrity-protected**. A local attacker with write access to these files can append a forged entry with a valid chain hash (the algorithm is deterministic and documented). The verifier will accept such entries as part of the chain.
+
+If the trace WAL cannot be written (e.g. disk full), the proxy continues but the affected request is not in the verifiable audit trail.
+
+**Mitigations:**
+- Restrict filesystem permissions (e.g. WAL directory not world-writable; checkpoint mode 0600).
+- Run the proxy in a container or sandbox that limits write access to the WAL path.
+- For high-assurance deployments, consider checkpoint signing or append-only storage.
+
 ## Swarm Lineage and parent_task_id
 
 When Agent A calls Agent B, trace entries can include `parent_task_id` to represent the parent agent's receipt ID. The dashboard Receipts page supports lineage filtering via `GET /api/receipts?parent_task_id=X`.

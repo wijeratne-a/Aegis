@@ -27,7 +27,7 @@
    cd sdks/python && pip install -e .
    ```
 
-4. **CA Trust:** After the proxy starts, it writes the Root CA to `deploy/certs/ca.crt`. Set `REQUESTS_CA_BUNDLE=./deploy/certs/ca.crt` (Python) or `NODE_EXTRA_CA_CERTS=./deploy/certs/ca.crt` (Node) for HTTPS through the proxy. The CA path is relative to your current working directory—run agents from repo root or use an absolute path for `REQUESTS_CA_BUNDLE`. Or set `CATENAR_DEMO=1` before running agents to auto-configure.
+4. **CA Trust:** After the proxy starts, it writes the Root CA to `deploy/certs/ca.crt`. **Agents MUST set `REQUESTS_CA_BUNDLE` (Python) or `NODE_EXTRA_CA_CERTS` (Node) to the proxy's CA**—do not disable TLS verification (`verify=False`), or you risk MitM. The CA path is relative to your current working directory—run agents from repo root or use an absolute path for `REQUESTS_CA_BUNDLE`. Or set `CATENAR_DEMO=1` before running agents to auto-configure.
 
 See [policy-quickstart.md](policy-quickstart.md) for where policy is defined and how dashboard, proxy, and agent relate.
 

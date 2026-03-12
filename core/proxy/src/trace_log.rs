@@ -35,7 +35,16 @@ fn checkpoint_path(wal_path: &Path) -> PathBuf {
 
 fn write_checkpoint(checkpoint_path: &Path, hash: &str) -> Result<()> {
     fs::write(checkpoint_path, hash.as_bytes())
-        .with_context(|| format!("failed to write checkpoint {}", checkpoint_path.display()))
+        .with_context(|| format!("failed to write checkpoint {}", checkpoint_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(checkpoint_path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(checkpoint_path, perms)
+            .with_context(|| format!("failed to restrict checkpoint permissions {}", checkpoint_path.display()))?;
+    }
+    Ok(())
 }
 
 impl TraceLogger {
@@ -122,6 +131,20 @@ fn compute_chain_hash(previous_hash: &str, payload: &str) -> String {
 
 const TAIL_BYTES: usize = 64 * 1024; // 64 KB from end; avoids OOM on large WAL
 
+/// Extract payload string (without chain_hash) for chain verification.
+fn payload_from_value(value: &serde_json::Value) -> Option<String> {
+    let obj = value.as_object()?;
+    if !obj.contains_key("chain_hash") {
+        return None;
+    }
+    let mut copy = obj.clone();
+    copy.remove("chain_hash");
+    serde_json::to_string(&serde_json::Value::Object(copy)).ok()
+}
+
+/// Load the chain_hash from the last valid line of the WAL (by file offset).
+/// Uses the last 64 KB tail; the last line is the substring after the final newline.
+/// If the last line does not chain correctly from the previous line (tampered), return the previous line's hash.
 fn load_last_hash(path: &Path) -> String {
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -142,20 +165,53 @@ fn load_last_hash(path: &Path) -> String {
     if file.read_exact(&mut tail).is_err() {
         return String::new();
     }
-    let content = String::from_utf8_lossy(&tail);
-    for line in content.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(hash) = value.get("chain_hash").and_then(|v| v.as_str()) {
-                return hash.to_string();
+    let content_raw = String::from_utf8_lossy(&tail);
+    let content = content_raw.trim_end_matches('\n');
+    // Last line by file offset: substring after the final newline (or whole content if no newline)
+    let last_line = content
+        .rfind('\n')
+        .map(|i| content[i + 1..].trim())
+        .unwrap_or_else(|| content.trim());
+    if last_line.is_empty() {
+        return String::new();
+    }
+    let last_value = match serde_json::from_str::<serde_json::Value>(last_line) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    let last_hash = match last_value.get("chain_hash").and_then(|v| v.as_str()) {
+        Some(h) => h
+            .to_string(),
+        None => return String::new(),
+    };
+    let last_payload = match payload_from_value(&last_value) {
+        Some(p) => p,
+        None => return String::new(),
+    };
+    // If there is a previous line, verify the last line chains from it; if not, treat as tampered
+    let prev_line = content.rfind('\n').and_then(|last_nl| {
+        let before_last = &content[..last_nl];
+        before_last
+            .rfind('\n')
+            .map(|prev_nl| before_last[prev_nl + 1..].trim())
+            .or_else(|| {
+                let t = before_last.trim();
+                if t.is_empty() { None } else { Some(t) }
+            })
+    });
+    if let Some(prev) = prev_line {
+        if !prev.is_empty() {
+            if let Ok(prev_value) = serde_json::from_str::<serde_json::Value>(prev) {
+                if let Some(prev_hash) = prev_value.get("chain_hash").and_then(|v| v.as_str()) {
+                    let expected = compute_chain_hash(prev_hash, &last_payload);
+                    if expected != last_hash {
+                        return prev_hash.to_string();
+                    }
+                }
             }
         }
-        break;
     }
-    String::new()
+    last_hash
 }
 
 #[cfg(test)]

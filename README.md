@@ -48,7 +48,7 @@ docker compose up -d verifier proxy web prometheus grafana
 # Grafana:  http://localhost:3002 (admin/admin)
 ```
 
-**Python agents:** After the proxy starts, it writes the CA to `deploy/certs/ca.crt`. Run your agent from the repo root so `./deploy/certs/ca.crt` resolves, or set `REQUESTS_CA_BUNDLE` to an absolute path. Set `CATENAR_DEMO=1` before running your agent for auto proxy/CA config, or manually:
+**Python agents:** After the proxy starts, it writes the CA to `deploy/certs/ca.crt`. **Agents MUST set `REQUESTS_CA_BUNDLE` (or `NODE_EXTRA_CA_CERTS`) to the proxy's CA**—do not disable TLS verification. Run your agent from the repo root so `./deploy/certs/ca.crt` resolves, or set `REQUESTS_CA_BUNDLE` to an absolute path. Set `CATENAR_DEMO=1` before running your agent for auto proxy/CA config, or manually:
 
 ```bash
 export HTTP_PROXY=http://127.0.0.1:8080 HTTPS_PROXY=http://127.0.0.1:8080

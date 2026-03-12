@@ -111,6 +111,16 @@ export default function AlertsPage() {
                       </span>
                     </div>
                     <p className="mt-2 font-mono text-sm">{sanitizeForDisplay(a.reason)}</p>
+                    {a.suggestion && (
+                      <div className="mt-2 rounded border border-green-600/40 bg-green-50/50 p-3 dark:border-green-500/30 dark:bg-green-950/20">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-green-700 dark:text-green-400">
+                          Agent suggestion provided
+                        </span>
+                        <p className="mt-1 font-mono text-sm text-green-800 dark:text-green-300">
+                          {sanitizeForDisplay(a.suggestion)}
+                        </p>
+                      </div>
+                    )}
                     <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                       <span>
                         <span className="font-medium">domain:</span> {sanitizeForDisplay(a.domain)}

@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useReceipts, useSession } from "@/lib/api";
+import { ChainGraph } from "@/components/chain-graph";
 import { getHumanContext, formatAgentIdFallback } from "@/lib/demo-identity-labels";
 import { sanitizeForDisplay } from "@/lib/sanitize";
 import type { PotReceipt } from "@/lib/types";
@@ -276,6 +277,18 @@ export default function ReceiptsPage() {
         </Link>{" "}
         | Recent incidents
       </p>
+
+      {receiptsQuery.data && receiptsQuery.data.length >= 2 && (
+        <section className="mt-8">
+          <h2 className="text-lg font-semibold">Swarm Lineage Graph</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Parent-child relationships from parent_task_id (run swarm_demo.py to see Agent A → Agent B)
+          </p>
+          <div className="mt-4">
+            <ChainGraph receipts={receiptsQuery.data} />
+          </div>
+        </section>
+      )}
 
       <section className="mt-8">
         <h2 className="text-lg font-semibold">Live Feed</h2>

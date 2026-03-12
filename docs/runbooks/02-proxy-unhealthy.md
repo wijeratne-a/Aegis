@@ -18,10 +18,11 @@
    - NetworkPolicy allows proxy → verifier egress
    - Verifier is running and healthy
 
-3. **Policy load**: Invalid policy.json or Rego can cause startup failure.
-   - Check ConfigMap `configmap-policy` or mounted policy volume.
+3. **Policy load**: Invalid policy.json or Rego can cause startup failure. If Rego fails to load (e.g. missing file or syntax error), the proxy starts with no payload/response engine and **allows requests** (fail-open). Check logs for "failed to load policy" or "failed to compile payload Rego policy". Check ConfigMap `configmap-policy` or mounted policy volume.
 
-4. **Resource limits**: OOMKilled? Increase memory limits in values.yaml.
+4. **WAL / trace log**: If the WAL partition is full or unwritable, the proxy logs a warning and continues; the affected request is not recorded in the trace. Ensure the WAL volume has sufficient space and is not read-only.
+
+5. **Resource limits**: OOMKilled? Increase memory limits in values.yaml.
 
 ## Resolution
 

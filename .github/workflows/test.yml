@@ -52,3 +52,70 @@ jobs:
 
       - name: Run Dashboard tests
         run: cd dashboard && npm test && npm run lint
+
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install security test deps
+        run: pip install -r scripts/security/requirements.txt
+
+      - name: Build catenar-verify
+        run: cargo build --manifest-path tools/catenar-verify/Cargo.toml
+
+      - name: Prepare for proxy
+        run: |
+          mkdir -p deploy/certs data
+          cp policy.json.example policy.json 2>/dev/null || true
+
+      - name: Start proxy and verifier
+        run: docker compose up -d --wait verifier proxy
+
+      - name: Create WAL for chain tests
+        run: |
+          mkdir -p data
+          python -c "
+          import json
+          from pathlib import Path
+          import blake3
+          def ch(prev, payload):
+              h = blake3.blake3(derive_key_context='catenar.trace.chain.v1')
+              pb, pl = prev.encode(), payload.encode()
+              h.update(len(pb).to_bytes(8,'little')); h.update(pb)
+              h.update(len(pl).to_bytes(8,'little')); h.update(pl)
+              return '0x'+h.hexdigest()
+          e1 = {'action':'test','timestamp_ns':1000}
+          p1 = json.dumps(e1, separators=(',',':'))
+          h1 = ch('', p1)
+          e1['chain_hash'] = h1
+          Path('data/proxy-trace.jsonl').write_text(json.dumps(e1, separators=(',',':'))+chr(10))
+          Path('data/proxy-trace.jsonl.chain_checkpoint').write_text(h1)
+          "
+
+      - name: Run security audit tests
+        run: python scripts/security/run_all.py
+        env:
+          SECURITY_PROXY_URL: http://127.0.0.1:8080
+          SECURITY_CA_PATH: ${{ github.workspace }}/deploy/certs/ca.crt
+
+      - name: Check for critical vulnerabilities
+        run: |
+          VULN=$(grep -E "^(1\.1|1\.2|1\.3|3\.1|3\.2)\s+VULN" scripts/security/results.txt || true)
+          if [ -n "$VULN" ]; then
+            echo "Critical vulnerabilities found:"
+            echo "$VULN"
+            exit 1
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-audit-results
+          path: scripts/security/results.txt

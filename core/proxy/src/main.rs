@@ -297,10 +297,20 @@ async fn main() -> Result<()> {
             let svc = service_fn(move |req: Request<Incoming>| {
                 let state = state.clone();
                 async move {
+                    let method = req.method().clone();
+                    let target = req.uri().to_string();
                     let resp = match intercept::handle(state.clone(), req, remote_addr).await {
                         Ok(resp) => resp,
                         Err(err) => {
                             error!("proxy request handling error: {err}");
+                            let request_id = intercept::generate_request_id();
+                            intercept::append_trace_entry_proxy_error(
+                                &state,
+                                &request_id,
+                                &method,
+                                &target,
+                                "proxy request handling error",
+                            );
                             let body = if state.config.enforce_mode == EnforceMode::AuditOnly
                                 || state.degraded_mode.load(Ordering::Relaxed)
                             {

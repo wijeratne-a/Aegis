@@ -7,6 +7,7 @@ export type StoredAlert = {
   policy_commitment: string;
   domain: string;
   reason: string;
+  suggestion?: string;
   timestamp_ns: number;
   received_at: string;
   severity?: string;

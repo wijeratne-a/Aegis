@@ -57,6 +57,7 @@ Write-Host ""
 
 if ($RunSwarm) {
     Write-Step "Swarm demo (E2E)"
+    Set-Location $RepoRoot
     if (-not (Test-Path policy.json)) { Copy-Item policy.json.example policy.json }
     docker compose up -d --wait verifier proxy
     python examples/swarm_demo.py

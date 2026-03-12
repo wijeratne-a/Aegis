@@ -95,6 +95,7 @@ type AlertListResponse = {
     policy_commitment: string;
     domain: string;
     reason: string;
+    suggestion?: string;
     timestamp_ns: number;
     received_at: string;
     severity: string;
@@ -165,6 +166,7 @@ type IncidentResponse = {
   policy_commitment: string;
   domain: string;
   reason: string;
+  suggestion?: string;
   timestamp_ns: number;
   received_at: string;
   severity: string;

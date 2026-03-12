@@ -344,8 +344,12 @@ pub struct PolicyConfig {
     pub restricted_endpoints: Vec<String>,
 }
 
-/// Max HTTP request body size (5 MB) for MITM payload parsing.
-const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
+/// Max HTTP request body size (2 MB) for MITM payload parsing.
+/// Reduced from 5 MB to mitigate DoS from many concurrent large bodies.
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Max time to read request body (slowloris mitigation).
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Max HTTP response body size (10 MB) when relaying from upstream.
 const MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
@@ -457,7 +461,7 @@ pub struct LivePolicy {
 
 pub type ProxyBody = Full<bytes::Bytes>;
 
-fn generate_request_id() -> String {
+pub fn generate_request_id() -> String {
     Uuid::new_v4().to_string()
 }
 
@@ -528,6 +532,27 @@ fn append_trace_entry(
             warn!("failed writing proxy trace log: {err}");
         }
     });
+}
+
+/// Append a trace entry for proxy/request-handling errors (used when full request context is unavailable).
+pub fn append_trace_entry_proxy_error(
+    state: &ProxyState,
+    request_id: &str,
+    method: &Method,
+    target: &str,
+    reason: &str,
+) {
+    append_trace_entry(
+        state,
+        request_id.to_string(),
+        method,
+        target,
+        true,
+        "proxy_error",
+        false,
+        Some(reason),
+        "tool",
+    );
 }
 
 fn emit_webhook_event(state: &ProxyState, event: WebhookEvent) {
@@ -1025,19 +1050,28 @@ pub async fn handle(
     let forward_headers = req.headers().clone();
     let (_, body) = req.into_parts();
     let limited_body = Limited::new(body, MAX_BODY_BYTES);
-    let collected = match limited_body.collect().await {
-        Ok(c) => c,
-        Err(e) => {
+    let collected = match tokio::time::timeout(BODY_READ_TIMEOUT, limited_body.collect()).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
             if e.downcast_ref::<LengthLimitError>().is_some() {
                 return Ok(block_response(
                     &state.config,
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    "request body exceeds 5MB limit",
+                    "request body exceeds 2MB limit",
                     Some("Catenar Security Block: Payload too large. Reduce request body size. Do not retry."),
                     None,
                 ));
             }
             return Err(anyhow::anyhow!("body collection failed: {}", e));
+        }
+        Err(_) => {
+            return Ok(block_response(
+                &state.config,
+                StatusCode::REQUEST_TIMEOUT,
+                "request body read timeout (slow body)",
+                Some("Catenar Security Block: Request body read timed out. Do not retry."),
+                None,
+            ));
         }
     };
     let body_bytes = collected.to_bytes();
@@ -1593,9 +1627,9 @@ async fn handle_mitm_request(
     telemetry::increment_request(&host);
 
     let limited_body = Limited::new(body, MAX_BODY_BYTES);
-    let collected = match limited_body.collect().await {
-        Ok(c) => c,
-        Err(e) => {
+    let collected = match tokio::time::timeout(BODY_READ_TIMEOUT, limited_body.collect()).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
             if e.downcast_ref::<LengthLimitError>().is_some() {
                 let target_url = format!("https://{authority}{path_q}");
                 append_trace_entry(
@@ -1606,19 +1640,53 @@ async fn handle_mitm_request(
                     true,
                     "blocked",
                     false,
-                    Some("request body exceeds 5MB limit"),
+                    Some("request body exceeds 2MB limit"),
                     infer_topology(&headers_map),
                 );
                 telemetry::increment_blocked(&host, telemetry::ViolationType::PolicyViolation);
                 return Ok(block_response(
                     &state.config,
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    "request body exceeds 5MB limit",
+                    "request body exceeds 2MB limit",
                     Some("Catenar Security Block: Payload too large. Reduce request body size. Do not retry."),
                     None,
                 ));
             }
+            let target_url = format!("https://{authority}{path_q}");
+            append_trace_entry(
+                &state,
+                request_id.clone(),
+                &method,
+                &target_url,
+                true,
+                "request_handling_error",
+                false,
+                Some("body collection failed"),
+                infer_topology(&headers_map),
+            );
             return Err(e);
+        }
+        Err(_) => {
+            let target_url = format!("https://{authority}{path_q}");
+            append_trace_entry(
+                &state,
+                request_id.clone(),
+                &method,
+                &target_url,
+                true,
+                "blocked",
+                false,
+                Some("request body read timeout"),
+                infer_topology(&headers_map),
+            );
+            telemetry::increment_blocked(&host, telemetry::ViolationType::PolicyViolation);
+            return Ok(block_response(
+                &state.config,
+                StatusCode::REQUEST_TIMEOUT,
+                "request body read timeout (slow body)",
+                Some("Catenar Security Block: Request body read timed out. Do not retry."),
+                None,
+            ));
         }
     };
     let body_bytes = collected.to_bytes();
@@ -1860,6 +1928,18 @@ async fn handle_mitm_request(
                 telemetry::observe_policy_eval_ms(
                     policy_eval_started.elapsed().as_secs_f64() * 1000.0,
                 );
+                let target_url = format!("https://{authority}{path_q}");
+                append_trace_entry(
+                    &state,
+                    request_id.clone(),
+                    &method,
+                    &target_url,
+                    true,
+                    "policy_eval_error",
+                    has_identity,
+                    Some(&e.to_string()),
+                    infer_topology(&headers_map),
+                );
                 if state.config.policy_debug {
                     debug!(
                         event = "policy_checkpoint",
@@ -2028,6 +2108,17 @@ async fn handle_mitm_request(
                     None,
                 ));
             }
+            append_trace_entry(
+                &state,
+                request_id.clone(),
+                &method,
+                &target_url,
+                true,
+                "request_handling_error",
+                has_identity,
+                Some("upstream forward failed"),
+                infer_topology(&headers_map),
+            );
             return Err(err.into());
         }
     };
@@ -2081,6 +2172,17 @@ async fn handle_mitm_request(
                         None,
                     ));
                 }
+                append_trace_entry(
+                    &state,
+                    request_id.clone(),
+                    &method,
+                    &target_url,
+                    true,
+                    "request_handling_error",
+                    has_identity,
+                    Some("upstream response stream error"),
+                    infer_topology(&headers_map),
+                );
                 return Err(err.into());
             }
         };

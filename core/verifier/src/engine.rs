@@ -339,6 +339,8 @@ struct PolicyViolationWebhook<'a> {
     policy_commitment: &'a str,
     domain: &'a str,
     reason: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggestion: Option<&'a str>,
     timestamp_ns: i64,
 }
 
@@ -372,6 +374,7 @@ pub async fn notify_policy_violation_if_configured(
             policy_commitment: &request.policy_commitment,
             domain: &request.agent_metadata.domain,
             reason,
+            suggestion: None,
             timestamp_ns: Utc::now().timestamp_nanos_opt().unwrap_or_default(),
         },
     )
@@ -568,6 +571,7 @@ mod tests {
                 policy_commitment: &request.policy_commitment,
                 domain: &request.agent_metadata.domain,
                 reason: response.reason.as_deref().unwrap_or("policy denied request"),
+                suggestion: None,
                 timestamp_ns: 1,
             },
         )

@@ -71,6 +71,7 @@ export const policyViolationWebhookSchema = z.object({
   policy_commitment: z.string().min(1).max(MAX_STRING),
   domain: z.string().min(1).max(MAX_STRING),
   reason: z.string().max(MAX_STRING),
+  suggestion: z.string().max(MAX_STRING).optional(),
   timestamp_ns: z.number(),
 });
 

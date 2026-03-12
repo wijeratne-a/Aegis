@@ -64,6 +64,7 @@ export async function POST(request: NextRequest) {
     policy_commitment: result.data.policy_commitment,
     domain: result.data.domain,
     reason: result.data.reason,
+    suggestion: result.data.suggestion,
     timestamp_ns: result.data.timestamp_ns,
     incident_id: incidentId,
     severity: severity.toString(),

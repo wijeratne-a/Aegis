@@ -184,6 +184,16 @@ export default function IncidentDetailPage() {
             <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Reason</span>
             <p className="mt-1 font-mono text-sm">{sanitizeForDisplay(incident.reason)}</p>
           </div>
+          {incident.suggestion && (
+            <div className="rounded border border-green-600/40 bg-green-50/50 p-4 dark:border-green-500/30 dark:bg-green-950/20">
+              <span className="text-xs font-semibold uppercase tracking-wide text-green-700 dark:text-green-400">
+                Agent suggestion provided
+              </span>
+              <p className="mt-2 font-mono text-sm text-green-800 dark:text-green-300">
+                {sanitizeForDisplay(incident.suggestion)}
+              </p>
+            </div>
+          )}
           <div>
             <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Domain</span>
             <p className="mt-1 font-mono text-sm">{sanitizeForDisplay(incident.domain)}</p>

@@ -1,7 +1,8 @@
-# Dependencies for Catenar examples (e.g. stress_test_agent.py)
+# Dependencies for Catenar examples (e.g. stress_test_agent.py, websocket_agent_demo.py)
 # Install: pip install -r examples/requirements.txt
 
 # From sdks/python (install separately: pip install -e sdks/python)
 # catenar-sdk provides: requests, pydantic
 
 httpx>=0.24.0
+websockets>=12.0

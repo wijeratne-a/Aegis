@@ -47,7 +47,7 @@ Catenar is a Zero Trust Network Access (ZTNA) layer for AI agents. It sits betwe
 
 ## Policy as Code
 
-Rego policies live in `policies/` (payload.rego, response.rego, default.rego). Helm mounts them via ConfigMap. For GitOps, policies are managed in version control and deployed via CI/CD.
+Rego policies live in `policies/` (payload.rego, response.rego). The proxy loads only payload.rego and response.rego; default.rego is not loaded by the proxy. Helm may mount default.rego for reference or tooling; it is not evaluated by the proxy. For GitOps, policies are managed in version control and deployed via CI/CD.
 
 ## Enterprise Control Plane (Closed Source)
 
