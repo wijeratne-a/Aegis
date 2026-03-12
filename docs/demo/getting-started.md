@@ -57,11 +57,11 @@ When your agent calls another agent, set the parent receipt ID so the chain is r
 Fastest path to show Receipts and Alerts:
 
 ```bash
-docker compose up -d verifier proxy
+docker compose up -d verifier proxy web
 python examples/bring_your_own_agent.py
 ```
 
-Then open Dashboard → Receipts and Alerts (http://localhost:3001). Run from repo root so the CA path resolves.
+Then open Dashboard → Receipts and Alerts (http://localhost:3001). Run from repo root so the CA path resolves. The `web` service is the dashboard.
 
 ## Manual Python Demo
 

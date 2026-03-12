@@ -33,6 +33,8 @@ flowchart TB
 
 ## Quick Start
 
+**Fastest path:** `cp policy.json.example policy.json && docker compose up -d verifier proxy web && python examples/bring_your_own_agent.py` → open http://localhost:3001 (Receipts). To see a block, add a host to `restricted_endpoints` in policy.json and reload or restart.
+
 ```bash
 # First run: create policy.json (or run make setup)
 cp policy.json.example policy.json
@@ -45,8 +47,16 @@ docker compose up -d verifier proxy web prometheus grafana
 # Verifier: http://localhost:3000
 # Proxy:   http://localhost:8080
 # Dashboard: http://localhost:3001
-# Grafana:  http://localhost:3002 (admin/admin)
+# Grafana:  http://localhost:3002 (admin / changeme-admin-demo-only; set GRAFANA_ADMIN_PASSWORD in production)
 ```
+
+## Audit trail
+
+The proxy writes a trace WAL (write-ahead log). Each entry includes a `chain_hash`: BLAKE3 with derive key `catenar.trace.chain.v1` over the previous hash and the entry payload (length-prefixed). Validate integrity with:
+
+`make verify` or `cargo run --manifest-path tools/catenar-verify/Cargo.toml -- ./data/proxy-trace.jsonl`
+
+This verifies the **proxy** WAL (`./data/proxy-trace.jsonl`), not the SDK's local WAL (`catenar-trace-wal.jsonl`).
 
 **Python agents:** After the proxy starts, it writes the CA to `deploy/certs/ca.crt`. **Agents MUST set `REQUESTS_CA_BUNDLE` (or `NODE_EXTRA_CA_CERTS`) to the proxy's CA**—do not disable TLS verification. Run your agent from the repo root so `./deploy/certs/ca.crt` resolves, or set `REQUESTS_CA_BUNDLE` to an absolute path. Set `CATENAR_DEMO=1` before running your agent for auto proxy/CA config, or manually:
 
@@ -58,7 +68,7 @@ export REQUESTS_CA_BUNDLE=./deploy/certs/ca.crt
 
 See [docs/demo/getting-started.md](docs/demo/getting-started.md) for full demo instructions.
 
-**CISO demo:** `docker compose up -d verifier proxy` → `python examples/bring_your_own_agent.py` from repo root → open Dashboard (http://localhost:3001) Receipts and Alerts.
+**CISO demo:** `docker compose up -d verifier proxy web` → `python examples/bring_your_own_agent.py` from repo root → open Dashboard (http://localhost:3001) Receipts and Alerts.
 
 ## Component Index
 
@@ -120,8 +130,6 @@ Optional: add `--swarm` (Unix) or `-Swarm` (Windows) to run the swarm demo after
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Proxy CA Trust](docs/proxy_mitm_ca_trust.md)
-- [Security Audit](docs/SECURITY_AUDIT.md)
-- [Design Standards](docs/web/design_standards.md)
 - [Runbooks](docs/runbooks/)
 - [Demo Getting Started](docs/demo/getting-started.md)
 

@@ -32,4 +32,4 @@ We will acknowledge receipt and provide status updates as we investigate. Public
 
 ## Security Audit
 
-See [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) for the latest security audit and remediation status.
+We conduct regular security reviews. Contact the maintainers for details on audit scope and remediation status.

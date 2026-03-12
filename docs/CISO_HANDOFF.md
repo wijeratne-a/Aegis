@@ -45,9 +45,8 @@ See [ENTERPRISE_BOUNDARY.md](ENTERPRISE_BOUNDARY.md) for full comparison.
 
 ## Security and Audit
 
-- [SECURITY_AUDIT.md](SECURITY_AUDIT.md) — AppSec remediation and key management
-- [RED_TEAM_SECURITY_AUDIT.md](RED_TEAM_SECURITY_AUDIT.md) — Red team findings
 - [docs/runbooks/](runbooks/) — Operational runbooks (policy violation spike, proxy unhealthy, etc.)
+- [security/trust-model.md](security/trust-model.md) — Trust model, VERIFIER_API_KEY, production auth
 
 ## Enterprise Contact
 

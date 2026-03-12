@@ -106,7 +106,7 @@ python examples/swarm_demo.py
 
 **CISO Message:** "Open Core covers testing and POC. For production, Enterprise adds HSM signing, HA idempotency, multi-sig policy validation, and distributed consensus. Here's the boundary."
 
-**Reference:** [ENTERPRISE_BOUNDARY.md](../ENTERPRISE_BOUNDARY.md), [SECURITY_AUDIT.md](../SECURITY_AUDIT.md)
+**Reference:** [ENTERPRISE_BOUNDARY.md](../ENTERPRISE_BOUNDARY.md)
 
 ---
 
@@ -122,4 +122,4 @@ If the CISO asks about incident investigation:
 
 ## Handoff
 
-After the demo, share [CISO_HANDOFF.md](../CISO_HANDOFF.md) for a one-page summary and links to security audit and enterprise contact.
+After the demo, share [CISO_HANDOFF.md](../CISO_HANDOFF.md) for a one-page summary and links to operational runbooks and enterprise contact.

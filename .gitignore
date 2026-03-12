@@ -53,3 +53,10 @@ core/verifier/policies.db
 dist/
 build/
 *.tsbuildinfo
+
+# Local-only / internal (excluded from public repo)
+docs/RED_TEAM_SECURITY_AUDIT.md
+docs/security/SECURITY-AUDIT-ZTNA.md
+docs/SECURITY_AUDIT.md
+docs/web/design_standards.md
+scripts/security/results.txt

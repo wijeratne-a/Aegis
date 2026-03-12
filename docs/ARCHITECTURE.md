@@ -31,7 +31,7 @@ Catenar is a Zero Trust Network Access (ZTNA) layer for AI agents. It sits betwe
 3. Proxy decrypts, parses payload, evaluates `policies/payload.rego`.
 4. On block: returns semantic JSON error; optionally forwards to verifier for receipt.
 5. On allow: forwards request; buffers response; evaluates `policies/response.rego` (bidirectional defense).
-6. Verifier signs receipt (BLAKE3 chain + Ed25519); webhook notifies dashboard.
+6. Proxy appends to its BLAKE3-chained trace WAL; verifier validates the trace and signs the receipt (Ed25519); webhook notifies dashboard.
 
 ## Receipt Generation Semantics
 
