@@ -36,7 +36,9 @@ use crate::telemetry;
 use crate::trace_log::TraceLogger;
 use crate::webhook::{self, WebhookEvent};
 
-const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+pub const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+/// How often to evict expired entries from the rate limit map (prevents unbounded growth).
+pub const RATE_LIMIT_EVICTION_INTERVAL: Duration = Duration::from_secs(300);
 const RATE_LIMIT_MAX: u32 = 60;
 const POLICY_EVAL_TIMEOUT_MS: u64 = 500;
 
@@ -659,6 +661,19 @@ fn headers_to_map(
     map
 }
 
+/// Removes all headers whose name starts with "x-catenar-" (case-insensitive).
+/// Call before adding proxy-set Catenar headers so client cannot spoof them.
+fn strip_catenar_headers(headers: &mut http::HeaderMap<HeaderValue>) {
+    let to_remove: Vec<_> = headers
+        .keys()
+        .filter(|k| k.as_str().to_lowercase().starts_with("x-catenar-"))
+        .cloned()
+        .collect();
+    for k in to_remove {
+        headers.remove(k);
+    }
+}
+
 /// Returns empty identity. Identity must come from a verified token in future implementation.
 /// Client-supplied headers are untrusted and would allow policy bypass - do not read them.
 fn get_identity(_headers: &http::HeaderMap<HeaderValue>) -> IdentityContext {
@@ -723,6 +738,14 @@ fn check_rate_limit(state: &ProxyState, remote_addr: &SocketAddr) -> bool {
         })
         .or_insert((now, 1));
     !exceeded.get()
+}
+
+/// Evicts rate limit entries older than RATE_LIMIT_WINDOW. Call periodically to avoid unbounded memory growth.
+pub fn run_rate_limit_eviction(state: &ProxyState) {
+    let now = Instant::now();
+    state
+        .rate_limit
+        .retain(|_, (window_start, _)| now.duration_since(*window_start) < RATE_LIMIT_WINDOW);
 }
 
 pub async fn handle(
@@ -1079,6 +1102,9 @@ pub async fn handle(
     let mut forward = state.client.request(method.clone(), target_uri.to_string());
     for (name, value) in &forward_headers {
         if name.as_str().eq_ignore_ascii_case("proxy-connection") {
+            continue;
+        }
+        if name.as_str().to_lowercase().starts_with("x-catenar-") {
             continue;
         }
         forward = forward.header(name, value);
@@ -1998,6 +2024,7 @@ async fn handle_mitm_request(
     let mut headers = parts.headers.clone();
     headers.remove("proxy-connection");
     headers.remove("Proxy-Connection");
+    strip_catenar_headers(&mut headers);
     insert_request_id_header(&mut headers, &request_id);
 
     let trace_hash = {

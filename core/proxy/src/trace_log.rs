@@ -129,7 +129,9 @@ fn compute_chain_hash(previous_hash: &str, payload: &str) -> String {
     format!("0x{}", hasher.finalize().to_hex())
 }
 
-const TAIL_BYTES: usize = 64 * 1024; // 64 KB from end; avoids OOM on large WAL
+/// Must be >= maximum possible single-line size in the WAL (e.g. if request bodies are ever logged).
+/// Proxy uses 2 MB max body; use 2 MB + buffer so the last line is never truncated on restart.
+const TAIL_BYTES: usize = (2 * 1024 * 1024) + 8192;
 
 /// Extract payload string (without chain_hash) for chain verification.
 fn payload_from_value(value: &serde_json::Value) -> Option<String> {

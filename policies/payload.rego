@@ -11,30 +11,25 @@ default suggestion = ""
 # Identity fields in payload policy are currently advisory only.
 # Authoritative identity/task binding is enforced by verifier task tokens.
 
-# Deny if body.text matches SSN-like pattern (A2T).
+# True if the request body (any key, including messages[].content, tool_calls, etc.) contains an SSN-like pattern.
+body_contains_ssn {
+  input.body != null
+  body_str := json.marshal(input.body)
+  regex.match("[0-9]{3}-[0-9]{2}-[0-9]{4}", body_str)
+}
+
+# Deny if body contains SSN-like pattern (A2T) - checks full serialized body to cover all API shapes.
 allow = false {
-  body := input.body
-  body != null
-  body.text != null
-  regex.match("[0-9]{3}-[0-9]{2}-[0-9]{4}", body.text)
+  body_contains_ssn
 }
 reason = "body contains SSN-like pattern" {
-  body := input.body
-  body != null
-  body.text != null
-  regex.match("[0-9]{3}-[0-9]{2}-[0-9]{4}", body.text)
+  body_contains_ssn
 }
 violation_type = "sensitive_data_exposure" {
-  body := input.body
-  body != null
-  body.text != null
-  regex.match("[0-9]{3}-[0-9]{2}-[0-9]{4}", body.text)
+  body_contains_ssn
 }
 suggestion = "Remove or redact SSN-like patterns from the request body before sending" {
-  body := input.body
-  body != null
-  body.text != null
-  regex.match("[0-9]{3}-[0-9]{2}-[0-9]{4}", body.text)
+  body_contains_ssn
 }
 
 # A2A: when x-catenar-caller is present (agent-to-agent), require x-catenar-trace for audit chain.

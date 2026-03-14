@@ -282,6 +282,16 @@ async fn main() -> Result<()> {
         }
     });
 
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            loop {
+                tokio::time::sleep(intercept::RATE_LIMIT_EVICTION_INTERVAL).await;
+                intercept::run_rate_limit_eviction(&state);
+            }
+        }
+    });
+
     let addr: SocketAddr = bind
         .parse()
         .with_context(|| format!("invalid PROXY_BIND address {bind}"))?;
