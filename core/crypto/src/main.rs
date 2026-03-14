@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    time::SystemTime,
-};
+use std::{fs, time::SystemTime};
 
 use anyhow::Context as _;
 use ed25519_dalek::{Signer, SigningKey};
@@ -33,8 +29,16 @@ fn main() -> anyhow::Result<()> {
 
     let key_path = "signing_key.bin";
     fs::write(key_path, signing_key.to_bytes())?;
-    fs::set_permissions(key_path, fs::Permissions::from_mode(0o600))?;
-    println!("[crypto] Private key written to {key_path} (mode 0600)");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(key_path, fs::Permissions::from_mode(0o600))?;
+        println!("[crypto] Private key written to {key_path} (mode 0600)");
+    }
+    #[cfg(not(unix))]
+    {
+        println!("[crypto] Private key written to {key_path}");
+    }
 
     // ── BLAKE3 integrity hash of policy.json ──
     let policy_bytes = fs::read("policy.json").context("failed to read policy.json")?;

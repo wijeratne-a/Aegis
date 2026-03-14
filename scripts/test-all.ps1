@@ -1,6 +1,6 @@
 # Run all unit/integration tests. Exit 1 on first failure.
-# Usage: .\scripts\test-all.ps1 [-Swarm]
-#   -Swarm: after unit tests, run swarm demo (requires verifier+proxy up)
+# Usage: .\scripts\test-all.ps1 [-Swarm | --swarm]
+#   -Swarm or --swarm: after unit tests, run swarm demo (requires verifier+proxy up)
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -9,7 +9,7 @@ Set-Location $RepoRoot
 
 $RunSwarm = $false
 foreach ($arg in $args) {
-    if ($arg -eq "-Swarm") {
+    if ($arg -eq "-Swarm" -or $arg -eq "--swarm") {
         $RunSwarm = $true
         break
     }
@@ -20,7 +20,7 @@ function Write-Ok { param($Name) Write-Host "$Name`: OK" -ForegroundColor Green 
 
 Write-Step "Verifier"
 Set-Location "$RepoRoot\core\verifier"
-cargo test --release
+cargo test
 if ($LASTEXITCODE -ne 0) { exit 1 }
 Write-Ok "Verifier"
 Write-Host ""

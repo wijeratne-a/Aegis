@@ -274,6 +274,18 @@ pub async fn run(key_provider: Arc<dyn KeyProvider>) -> anyhow::Result<()> {
         rate_limit: Arc::new(DashMap::new()),
     };
 
+    let rate_limit_clone = state.rate_limit.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            let now = Instant::now();
+            rate_limit_clone.retain(|_, (window_start, _)| {
+                now.duration_since(*window_start) < RATE_LIMIT_WINDOW
+            });
+        }
+    });
+
     if state.api_key.is_none() {
         tracing::warn!(
             "VERIFIER_API_KEY not set; verifier API is unauthenticated. Set VERIFIER_API_KEY in production."
